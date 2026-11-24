@@ -16,6 +16,7 @@ public:
     std::string orderFile() const;         // data/Order.txt
     std::string orderDetailFile() const;   // data/OrderDetail.txt
     std::string billFile() const;          // data/Bill.txt
+    std::string categoryFile() const;      // data/PCategory.txt
 
     // Product.txt stores image paths such as "sample_data/barcodes/123456.bmp" (relative to the .exe).
     std::string resolve(const std::string& relativePath) const;

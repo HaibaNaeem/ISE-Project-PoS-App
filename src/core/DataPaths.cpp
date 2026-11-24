@@ -12,6 +12,7 @@ std::string DataPaths::productFile() const      { return (fs::path(dataDir()) / 
 std::string DataPaths::orderFile() const        { return (fs::path(dataDir()) / "Order.txt").generic_string(); }
 std::string DataPaths::orderDetailFile() const  { return (fs::path(dataDir()) / "OrderDetail.txt").generic_string(); }
 std::string DataPaths::billFile() const         { return (fs::path(dataDir()) / "Bill.txt").generic_string(); }
+std::string DataPaths::categoryFile() const     { return (fs::path(dataDir()) / "PCategory.txt").generic_string(); }
 
 std::string DataPaths::resolve(const std::string& relativePath) const {
     fs::path p(relativePath);
@@ -24,7 +25,7 @@ OperationResult DataPaths::ensureDataFolder() const {
     fs::create_directories(dataDir(), ec);
     if (ec) return {false, "Cannot create data folder: " + ec.message()};
 
-    const char* names[] = {"Product.txt", "Order.txt", "OrderDetail.txt", "Bill.txt"};
+    const char* names[] = {"Product.txt", "Order.txt", "OrderDetail.txt", "Bill.txt", "PCategory.txt"};
     int created = 0;
     for (const char* name : names) {
         fs::path target = fs::path(dataDir()) / name;
