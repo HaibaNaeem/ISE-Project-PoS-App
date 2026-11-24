@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "DataPaths.h"
+#include "CategoryStore.h"
 #include "ProductCatalog.h"
 #include "OrderStore.h"
 #include "BillStore.h"
@@ -20,6 +21,7 @@ public:
 
 private:
     DataPaths paths_;
+    CategoryStore categories_;
     ProductCatalog catalog_;
     OrderStore store_;
     BillStore bills_;
