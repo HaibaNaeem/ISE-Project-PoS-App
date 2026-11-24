@@ -1,6 +1,8 @@
 #pragma once
+// OWNER: Member 1. Order screen layout and cashier interactions.
 #include <QWidget>
 #include <QString>
+#include <optional>
 
 #include "ProductCatalog.h"
 #include "OrderManager.h"
@@ -12,6 +14,7 @@ class QLineEdit;
 class QDoubleSpinBox;
 class QTableWidget;
 class QPushButton;
+class CameraPanel;
 
 class OrderPage : public QWidget {
     Q_OBJECT
@@ -47,7 +50,7 @@ private:
     CheckoutService& checkout_;
     QString          lastBarcode_;
 
-    QWidget*        cameraHolder_ = nullptr;
+    CameraPanel*    cameraPanel_ = nullptr;
     QLineEdit*      barcodeEdit_ = nullptr;
     QDoubleSpinBox* qtyBox_ = nullptr;
     QLineEdit*      nameEdit_ = nullptr;
