@@ -83,3 +83,22 @@ Money multiplyPriceByQuantity(Money unitPrice, Quantity quantity)
 {
     return (unitPrice * quantity + 500) / 1000;   // rounded half up
 }
+OperationResult parsePercent(const std::string& text, Percent& out)
+{
+    OperationResult r;
+    std::int64_t v = 0;
+    if (!parseScaled(text, 2, 2, v)) { r.message = "Invalid percent '" + text + "'."; return r; }
+    out = v;
+    r.success = true;
+    return r;
+}
+
+std::string formatPercent(Percent p)
+{
+    return std::to_string(p / 100) + "." + padLeft(p % 100, 2);
+}
+
+Money percentOf(Money amount, Percent percent)
+{
+    return (amount * percent + 5000) / 10000;
+}
