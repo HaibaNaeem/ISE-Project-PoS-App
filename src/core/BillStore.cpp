@@ -1,353 +1,322 @@
 // OWNER: Member 4.
-// Handles loading, saving, serialization, and next-ID generation for Bill.txt.
+// Increment 3 dual-file persistence implementation for Bill.txt and BillDetail.txt.
 #include "BillStore.h"
 #include "RecordFormat.h"
-#include <filesystem>
+#include "Units.h"
 #include <fstream>
-#include <iomanip>
 #include <sstream>
+#include <algorithm>
+#include <filesystem>
+#include <cctype>
 
 namespace fs = std::filesystem;
 
 namespace {
 
-// Format money value to "XXX.YY"
-std::string formatMoneyString(Money amount) {
-    std::string s = formatMoney(amount);
-    if (s != "TODO") {
-        return s;
+std::string padLeft(std::int64_t v, int width) {
+    std::string s = std::to_string(v);
+    while (static_cast<int>(s.size()) < width) {
+        s = "0" + s;
     }
-    // Fallback if M2 stub is still on dev branch
-    std::string sign = amount < 0 ? "-" : "";
-    if (amount < 0) amount = -amount;
-    std::string cents = std::to_string(amount % 100);
-    if (cents.size() < 2) cents = "0" + cents;
-    return sign + std::to_string(amount / 100) + "." + cents;
-}
-
-// Format quantity: "2" for count / whole units, "1.250" for weight / decimals
-std::string formatQuantityString(Quantity qty) {
-    if (qty % 1000 == 0) {
-        return std::to_string(qty / 1000);
-    }
-    std::string decimals = std::to_string(qty % 1000);
-    while (decimals.size() < 3) decimals = "0" + decimals;
-    return std::to_string(qty / 1000) + "." + decimals;
-}
-
-// Safe money parser
-bool safeParseMoney(const std::string& text, Money& out) {
-    OperationResult r = parseMoney(text, out);
-    if (r.success) {
-        return true;
-    }
-    // Fallback if M2 stub is still returning TODO
-    try {
-        size_t dot = text.find('.');
-        if (dot == std::string::npos) {
-            out = std::stoll(text) * 100;
-            return true;
-        }
-        std::string whole = text.substr(0, dot);
-        std::string frac = text.substr(dot + 1);
-        if (frac.size() == 1) frac += "0";
-        else if (frac.size() > 2) frac = frac.substr(0, 2);
-        out = std::stoll(whole) * 100 + std::stoll(frac);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-// Safe quantity parser
-bool safeParseQuantity(const std::string& text, Quantity& out) {
-    OperationResult r = parseQuantity(text, MeasureUnit::Weight, out);
-    if (r.success) {
-        return true;
-    }
-    // Fallback
-    try {
-        size_t dot = text.find('.');
-        if (dot == std::string::npos) {
-            out = std::stoll(text) * 1000;
-            return true;
-        }
-        std::string whole = text.substr(0, dot);
-        std::string frac = text.substr(dot + 1);
-        while (frac.size() < 3) frac += "0";
-        if (frac.size() > 3) frac = frac.substr(0, 3);
-        out = std::stoll(whole) * 1000 + std::stoll(frac);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-// Safe line splitter that handles quotes and trailing '#'
-OperationResult safeSplitRecord(const std::string& line, int lineNum, std::vector<std::string>& fields) {
-    OperationResult r = splitRecord(line, lineNum, fields);
-    if (r.success) {
-        return r;
-    }
-    // If the failure is a real syntax error from M2 (e.g. missing quote), return it
-    if (r.message.find("TODO") == std::string::npos) {
-        return r;
-    }
-
-    // Fallback parser if M2's RecordFormat is still returning TODO
-    fields.clear();
-    size_t i = 0, n = line.size();
-    while (i < n) {
-        if (line[i] == ' ' || line[i] == '\t') {
-            ++i;
-            continue;
-        }
-        if (line[i] == '"') {
-            size_t j = line.find('"', i + 1);
-            if (j == std::string::npos) {
-                return {false, "line " + std::to_string(lineNum) + ": missing closing quote"};
-            }
-            fields.push_back(line.substr(i + 1, j - i - 1));
-            i = j + 1;
-        } else {
-            size_t j = i;
-            while (j < n && line[j] != ' ' && line[j] != '\t') {
-                ++j;
-            }
-            fields.push_back(line.substr(i, j - i));
-            i = j;
-        }
-    }
-
-    if (fields.empty() || fields.back() != "#") {
-        return {false, "line " + std::to_string(lineNum) + ": record must end with #"};
-    }
-    fields.pop_back(); // Remove '#'
-
-    return {true, "OK"};
-}
-
-// Safe write record
-std::string safeWriteRecord(const std::vector<std::string>& fields) {
-    std::string res = writeRecord(fields);
-    if (res != "TODO #") {
-        return res;
-    }
-    std::string s;
-    for (size_t i = 0; i < fields.size(); ++i) {
-        if (i > 0) s += " ";
-        s += fields[i];
-    }
-    s += " #";
     return s;
 }
 
-constexpr char kItemSeparator  = ';';   // between two products
-constexpr char kFieldSeparator = ',';   // between the parts of one product
-constexpr size_t kFieldsPerBillLine = 9;
-constexpr size_t kPartsPerItem = 4;
-
-// Splits "a;b;c" into {"a","b","c"} (simple helper, no tricks)
-std::vector<std::string> splitText(const std::string& text, char separator) {
-    std::vector<std::string> parts;
-    std::string current;
-    for (char c : text) {
-        if (c == separator) {
-            parts.push_back(current);
-            current.clear();
-        } else {
-            current += c;
-        }
+// Helper to format quantity: whole number as integer, fractions up to 3 decimals
+std::string formatQty(Quantity qty) {
+    if (qty % 1000 == 0) {
+        return std::to_string(qty / 1000);
     }
-    parts.push_back(current);
-    return parts;
+    return formatQuantity(qty, MeasureUnit::Weight);
 }
 
-// Reads the <items> field into BillLine objects.
-OperationResult parseItems(const std::string& text, int lineNum, std::vector<BillLine>& lines) {
-    lines.clear();
-    for (const std::string& itemText : splitText(text, kItemSeparator)) {
-        std::vector<std::string> parts = splitText(itemText, kFieldSeparator);
-        if (parts.size() != kPartsPerItem) {
-            return {false, "line " + std::to_string(lineNum) + ": bad item '" + itemText +
-                           "' (expected acronym,price,discount,quantity)"};
-        }
+// Helper to parse quantity robustly (supports whole numbers and decimals)
+bool parseQtyAny(const std::string& text, Quantity& out) {
+    std::string trimmed = text;
+    trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
+    trimmed.erase(trimmed.find_last_not_of(" \t\r\n") + 1);
+    if (trimmed.empty()) return false;
 
-        BillLine line;
-        line.acronym = parts[0];
-        if (!safeParseMoney(parts[1], line.unitPrice)) {
-            return {false, "line " + std::to_string(lineNum) + ": invalid unitPrice '" + parts[1] + "'"};
-        }
-        if (!safeParseMoney(parts[2], line.discountPerUnit)) {
-            return {false, "line " + std::to_string(lineNum) + ": invalid discountPerUnit '" + parts[2] + "'"};
-        }
-        if (!safeParseQuantity(parts[3], line.quantity)) {
-            return {false, "line " + std::to_string(lineNum) + ": invalid quantity '" + parts[3] + "'"};
-        }
-        lines.push_back(line);
+    // If text has dot, parse as weight (up to 3 decimals)
+    if (trimmed.find('.') != std::string::npos) {
+        OperationResult r = parseQuantity(trimmed, MeasureUnit::Weight, out);
+        return r.success;
     }
-    return {true, "OK"};
+    // Else parse as count (whole number)
+    OperationResult r = parseQuantity(trimmed, MeasureUnit::Count, out);
+    return r.success;
 }
 
-// Builds the <items> field from BillLine objects.
-std::string buildItemsField(const std::vector<BillLine>& lines) {
-    std::string text;
-    for (size_t i = 0; i < lines.size(); ++i) {
-        if (i > 0) text += kItemSeparator;
-        text += lines[i].acronym;
-        text += kFieldSeparator;
-        text += formatMoneyString(lines[i].unitPrice);
-        text += kFieldSeparator;
-        text += formatMoneyString(lines[i].discountPerUnit);
-        text += kFieldSeparator;
-        text += formatQuantityString(lines[i].quantity);
-    }
-    return text;
-}
 } // anonymous namespace
 
-BillStore::BillStore(std::string path) : path_(std::move(path)) {}
+BillStore::BillStore(std::string billPath, std::string detailPath)
+    : billPath_(std::move(billPath)), detailPath_(std::move(detailPath)) {}
 
-void BillStore::addBill(const Bill& bill) {
-    bills_.push_back(bill);
+void BillStore::setPaths(std::string billPath, std::string detailPath) {
+    billPath_ = std::move(billPath);
+    detailPath_ = std::move(detailPath);
 }
 
 void BillStore::clear() {
     bills_.clear();
 }
 
-OperationResult BillStore::load(const std::string& path) {
-    path_ = path;
+OperationResult BillStore::load(const std::string& billPath, const std::string& detailPath) {
+    setPaths(billPath, detailPath);
     return load();
 }
 
 OperationResult BillStore::load() {
     bills_.clear();
+    std::string warnings;
 
-    if (path_.empty() || !fs::exists(path_)) {
-        // Missing file is not an error; results in an empty store
-        return {true, "File does not exist (empty store)"};
-    }
-
-    std::vector<std::string> lines;
-    OperationResult readResult = readLines(path_, lines);
-    if (!readResult.success) {
-        // If M2 readLines returned TODO or file read failed, try direct file read
-        std::ifstream file(path_, std::ios::binary);
-        if (!file.is_open()) {
-            return {true, "Empty or inaccessible file"};
+    // Step 1: Load Bill.txt (one row per bill)
+    if (!billPath_.empty() && fs::exists(billPath_)) {
+        std::ifstream in(billPath_, std::ios::binary);
+        if (!in.is_open()) {
+            return {false, "Cannot open bill file: " + billPath_};
         }
+
         std::string line;
-        while (std::getline(file, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.find_first_not_of(" \t") == std::string::npos) continue;
-            lines.push_back(line);
+        int lineNum = 0;
+        while (std::getline(in, line)) {
+            ++lineNum;
+            // Trim whitespace
+            std::string trimmed = line;
+            trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
+            trimmed.erase(trimmed.find_last_not_of(" \t\r\n") + 1);
+            if (trimmed.empty()) continue;
+
+            std::vector<std::string> fields;
+            OperationResult splitRes = splitRecord(line, lineNum, fields);
+            if (!splitRes.success) {
+                warnings += "Bill.txt line " + std::to_string(lineNum) + ": " + splitRes.message + ". Skipped.\n";
+                continue;
+            }
+
+            // In Increment 3, Bill.txt has 14 fields:
+            // billId "customerName" orderId subtotal tax itemDiscount payable received balance status seasonalDiscount specialDiscount date time #
+            if (fields.size() != 14) {
+                warnings += "Bill.txt line " + std::to_string(lineNum) + ": Invalid field count (" +
+                            std::to_string(fields.size()) + ", expected 14). Old Increment 2 format or malformed row skipped.\n";
+                continue;
+            }
+
+            Bill b;
+            b.id = fields[0];
+            b.customerName = fields[1]; // splitRecord already removes outer quotes
+            b.orderId = fields[2];
+
+            if (!parseMoney(fields[3], b.subtotal).success ||
+                !parseMoney(fields[4], b.tax).success ||
+                !parseMoney(fields[5], b.itemDiscount).success ||
+                !parseMoney(fields[6], b.payable).success ||
+                !parseMoney(fields[7], b.received).success ||
+                !parseMoney(fields[8], b.balance).success) {
+                warnings += "Bill.txt line " + std::to_string(lineNum) + ": Invalid financial amount. Skipped.\n";
+                continue;
+            }
+
+            if (!parseOrderStatus(fields[9], b.status)) {
+                warnings += "Bill.txt line " + std::to_string(lineNum) + ": Invalid order status '" + fields[9] + "'. Skipped.\n";
+                continue;
+            }
+
+            if (!parseMoney(fields[10], b.seasonalDiscount).success ||
+                !parseMoney(fields[11], b.specialDiscount).success) {
+                warnings += "Bill.txt line " + std::to_string(lineNum) + ": Invalid discount amount. Skipped.\n";
+                continue;
+            }
+
+            b.date = fields[12];
+            b.time = fields[13];
+            b.discount = b.itemDiscount + b.seasonalDiscount + b.specialDiscount;
+
+            // Check uniqueness of Bill ID
+            if (findById(b.id).has_value()) {
+                warnings += "Bill.txt line " + std::to_string(lineNum) + ": Duplicate bill ID '" + b.id + "'. Skipped.\n";
+                continue;
+            }
+
+            bills_.push_back(b);
         }
     }
 
-    int lineNum = 0;
-    for (const auto& lineText : lines) {
-        ++lineNum;
-        std::vector<std::string> fields;
-        OperationResult splitRes = safeSplitRecord(lineText, lineNum, fields);
-        if (!splitRes.success) {
-            return splitRes;
+    // Step 2: Load BillDetail.txt (one row per product)
+    if (!detailPath_.empty() && fs::exists(detailPath_)) {
+        std::ifstream in(detailPath_, std::ios::binary);
+        if (!in.is_open()) {
+            return {false, "Cannot open bill detail file: " + detailPath_};
         }
 
-        // One line = one bill, exactly 9 fields:
-        // 0 billId, 1 customerName, 2 orderId, 3 items,
-        // 4 totalWithoutTax, 5 totalTax, 6 totalDiscount, 7 totalPayable, 8 status
-        if (fields.size() != kFieldsPerBillLine) {
-            return {false, "line " + std::to_string(lineNum) + ": expected " +
-                           std::to_string(kFieldsPerBillLine) + " fields but got " +
-                           std::to_string(fields.size())};
-        }
+        std::string line;
+        int lineNum = 0;
+        while (std::getline(in, line)) {
+            ++lineNum;
+            std::string trimmed = line;
+            trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
+            trimmed.erase(trimmed.find_last_not_of(" \t\r\n") + 1);
+            if (trimmed.empty()) continue;
 
-        Bill bill;
-        bill.id = fields[0];
-        bill.customerName = fields[1];
-        bill.orderId = fields[2];
+            std::vector<std::string> fields;
+            OperationResult splitRes = splitRecord(line, lineNum, fields);
+            if (!splitRes.success) {
+                warnings += "BillDetail.txt line " + std::to_string(lineNum) + ": " + splitRes.message + ". Skipped.\n";
+                continue;
+            }
 
-        OperationResult itemsRes = parseItems(fields[3], lineNum, bill.lines);
-        if (!itemsRes.success) {
-            return itemsRes;
-        }
+            // Expected: billId acronym unitPrice quantity discount # (5 fields)
+            if (fields.size() != 5) {
+                warnings += "BillDetail.txt line " + std::to_string(lineNum) + ": Invalid field count (" +
+                            std::to_string(fields.size()) + ", expected 5). Skipped.\n";
+                continue;
+            }
 
-        if (!safeParseMoney(fields[4], bill.subtotal)) {
-            return {false, "line " + std::to_string(lineNum) + ": invalid totalWithoutTax '" + fields[4] + "'"};
-        }
-        if (!safeParseMoney(fields[5], bill.tax)) {
-            return {false, "line " + std::to_string(lineNum) + ": invalid totalTax '" + fields[5] + "'"};
-        }
-        if (!safeParseMoney(fields[6], bill.discount)) {
-            return {false, "line " + std::to_string(lineNum) + ": invalid totalDiscount '" + fields[6] + "'"};
-        }
-        if (!safeParseMoney(fields[7], bill.payable)) {
-            return {false, "line " + std::to_string(lineNum) + ": invalid totalPayable '" + fields[7] + "'"};
-        }
-        if (!parseOrderStatus(fields[8], bill.status)) {
-            return {false, "line " + std::to_string(lineNum) + ": invalid status '" + fields[8] + "'"};
-        }
+            std::string billId = fields[0];
+            BillLine bl;
+            bl.acronym = fields[1];
 
-        bills_.push_back(bill);
+            if (!parseMoney(fields[2], bl.unitPrice).success) {
+                warnings += "BillDetail.txt line " + std::to_string(lineNum) + ": Invalid unit price '" + fields[2] + "'. Skipped.\n";
+                continue;
+            }
+
+            if (!parseQtyAny(fields[3], bl.quantity)) {
+                warnings += "BillDetail.txt line " + std::to_string(lineNum) + ": Invalid quantity '" + fields[3] + "'. Skipped.\n";
+                continue;
+            }
+
+            if (!parseMoney(fields[4], bl.discount).success) {
+                warnings += "BillDetail.txt line " + std::to_string(lineNum) + ": Invalid discount '" + fields[4] + "'. Skipped.\n";
+                continue;
+            }
+
+            // Attach to the corresponding bill
+            bool attached = false;
+            for (auto& b : bills_) {
+                if (b.id == billId) {
+                    b.lines.push_back(bl);
+                    attached = true;
+                    break;
+                }
+            }
+
+            if (!attached) {
+                warnings += "BillDetail.txt line " + std::to_string(lineNum) + ": Orphan detail for bill ID '" + billId + "'. Skipped.\n";
+            }
+        }
     }
 
-    return {true, "Loaded successfully"};
+    if (!warnings.empty()) {
+        return {true, warnings};
+    }
+
+    return {true, "Bills loaded successfully."};
 }
-std::string BillStore::serialize() const {
-    std::string output;
 
-    for (const auto& bill : bills_) {
-        // One line per bill, all products inside the items field
+std::string BillStore::serializeBills() const {
+    std::string out;
+    for (const auto& b : bills_) {
         std::vector<std::string> fields = {
-            bill.id,
-            quoteField(bill.customerName),
-            bill.orderId,
-            buildItemsField(bill.lines),
-            formatMoneyString(bill.subtotal),
-            formatMoneyString(bill.tax),
-            formatMoneyString(bill.discount),
-            formatMoneyString(bill.payable),
-            orderStatusToText(bill.status)
+            b.id,
+            quoteField(b.customerName),
+            b.orderId,
+            formatMoney(b.subtotal),
+            formatMoney(b.tax),
+            formatMoney(b.itemDiscount),
+            formatMoney(b.payable),
+            formatMoney(b.received),
+            formatMoney(b.balance),
+            orderStatusToText(b.status),
+            formatMoney(b.seasonalDiscount),
+            formatMoney(b.specialDiscount),
+            b.date.empty() ? "2026-11-22" : b.date,
+            b.time.empty() ? "14:05:09" : b.time
         };
-        output += safeWriteRecord(fields) + "\n";
+        out += writeRecord(fields) + "\n";
+    }
+    return out;
+}
+
+std::string BillStore::serializeDetails() const {
+    std::string out;
+    for (const auto& b : bills_) {
+        for (const auto& line : b.lines) {
+            std::vector<std::string> fields = {
+                b.id,
+                line.acronym,
+                formatMoney(line.unitPrice),
+                formatQty(line.quantity),
+                formatMoney(line.discount)
+            };
+            out += writeRecord(fields) + "\n";
+        }
+    }
+    return out;
+}
+
+OperationResult BillStore::save(const std::string& billPath, const std::string& detailPath) const {
+    if (!billPath.empty()) {
+        std::ofstream out(billPath, std::ios::binary);
+        if (!out.is_open()) {
+            return {false, "Cannot open bill file for writing: " + billPath};
+        }
+        out << serializeBills();
     }
 
-    return output;
-}
-OperationResult BillStore::save(const std::string& path) const {
-    std::ofstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        return {false, "Cannot open file for writing: " + path};
+    if (!detailPath.empty()) {
+        std::ofstream out(detailPath, std::ios::binary);
+        if (!out.is_open()) {
+            return {false, "Cannot open bill detail file for writing: " + detailPath};
+        }
+        out << serializeDetails();
     }
-    file << serialize();
-    file.close();
-    return {true, "Saved successfully"};
+
+    return {true, "Bills saved successfully."};
 }
 
 OperationResult BillStore::save() const {
-    if (path_.empty()) {
-        return {false, "No path configured for BillStore"};
+    return save(billPath_, detailPath_);
+}
+
+OperationResult BillStore::add(const Bill& bill) {
+    if (findById(bill.id).has_value()) {
+        return {false, "Bill ID already exists: " + bill.id};
     }
-    return save(path_);
+    bills_.push_back(bill);
+    return {true, "Bill added."};
+}
+
+OperationResult BillStore::replace(const Bill& bill) {
+    for (size_t i = 0; i < bills_.size(); ++i) {
+        if (bills_[i].id == bill.id) {
+            bills_[i] = bill;
+            return {true, "Bill replaced."};
+        }
+    }
+    return {false, "Bill not found: " + bill.id};
+}
+
+std::optional<Bill> BillStore::findById(const std::string& id) const {
+    for (const auto& b : bills_) {
+        if (b.id == id) return b;
+    }
+    return std::nullopt;
+}
+
+std::optional<Bill> BillStore::findByOrderId(const std::string& orderId) const {
+    for (const auto& b : bills_) {
+        if (b.orderId == orderId) return b;
+    }
+    return std::nullopt;
 }
 
 std::string BillStore::nextBillId() const {
-    std::int64_t maxId = 0;
-
-    for (const auto& bill : bills_) {
+    std::int64_t maxNum = 0;
+    for (const auto& b : bills_) {
         try {
-            std::int64_t num = std::stoll(bill.id);
-            if (num > maxId) {
-                maxId = num;
-            }
-        } catch (...) {
-            // Ignore non-numeric IDs if any
-        }
+            std::int64_t val = std::stoll(b.id);
+            if (val > maxNum) maxNum = val;
+        } catch (...) {}
     }
-
-    std::int64_t next = maxId + 1;
-    std::ostringstream ss;
-    ss << std::setw(9) << std::setfill('0') << next;
-    return ss.str();
+    return padLeft(maxNum + 1, 9);
 }

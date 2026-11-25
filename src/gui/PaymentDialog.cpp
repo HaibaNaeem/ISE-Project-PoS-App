@@ -1,82 +1,80 @@
 // OWNER: Member 4.
-// Cashier Payment Dialog implementation.
+// Cashier Payment Dialog implementation for Increment 3.
 #include "PaymentDialog.h"
 #include "DialogStyle.h"
 #include "Pricing.h"
+#include "DiscountRules.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QInputDialog>
+#include <QMessageBox>
 
 namespace {
 
-// Helper to format money for GUI display without doing any money math
 QString guiFormatMoney(Money amount) {
-    std::string s = formatMoney(amount);
-    if (s != "TODO") {
-        return QString::fromStdString(s + " PKR");
-    }
-    // Fallback if M2 stub is active
-    std::string sign = amount < 0 ? "-" : "";
-    if (amount < 0) amount = -amount;
-    std::string cents = std::to_string(amount % 100);
-    if (cents.size() < 2) cents = "0" + cents;
-    return QString::fromStdString(sign + std::to_string(amount / 100) + "." + cents + " PKR");
+    return QString::fromStdString(formatMoney(amount) + " PKR");
 }
 
-// Helper to parse money input from QLineEdit
 bool guiParseMoney(const QString& text, Money& out) {
     std::string str = text.trimmed().toStdString();
     OperationResult r = parseMoney(str, out);
-    if (r.success) {
-        return true;
-    }
-    // Fallback if M2 stub is active
-    try {
-        size_t dot = str.find('.');
-        if (dot == std::string::npos) {
-            out = std::stoll(str) * 100;
-            return true;
-        }
-        std::string whole = str.substr(0, dot);
-        std::string frac = str.substr(dot + 1);
-        if (frac.size() == 1) frac += "0";
-        else if (frac.size() > 2) frac = frac.substr(0, 2);
-        out = std::stoll(whole) * 100 + std::stoll(frac);
-        return true;
-    } catch (...) {
-        return false;
-    }
+    return r.success;
 }
 
 } // anonymous namespace
 
 PaymentDialog::PaymentDialog(Money payableAmount, QWidget* parent)
-    : QDialog(parent), payableAmount_(payableAmount) {
+    : PaymentDialog(payableAmount, true, nullptr, parent) {}
+
+PaymentDialog::PaymentDialog(Money payableAmount, bool isManager,
+                             std::function<bool()> approvalCallback,
+                             QWidget* parent)
+    : QDialog(parent), basePayableAmount_(payableAmount), currentPayable_(payableAmount),
+      isManager_(isManager), approvalCallback_(std::move(approvalCallback)) {
     setWindowTitle("Checkout - Payment");
-    setMinimumWidth(440);
+    setMinimumWidth(460);
     setStyleSheet(DialogStyle::dialogStyleSheet());
 
     setupUi();
     updateModeFields();
+    recalculateTotals();
 }
 
 void PaymentDialog::setupUi() {
     auto* mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(16, 16, 16, 16);
+    mainLayout->setContentsMargins(18, 18, 18, 18);
     mainLayout->setSpacing(14);
 
     // 1. Total Payable banner (Large bold text)
     auto* payableBox = new QGroupBox("Total Amount Due", this);
     auto* payableLayout = new QVBoxLayout(payableBox);
-    payableLabel_ = new QLabel(guiFormatMoney(payableAmount_), payableBox);
+    payableLabel_ = new QLabel(guiFormatMoney(currentPayable_), payableBox);
     payableLabel_->setAlignment(Qt::AlignCenter);
-    payableLabel_->setStyleSheet(QString("font-size: 20pt; font-weight: bold; color: %1; padding: 6px;")
+    payableLabel_->setStyleSheet(QString("font-size: 22pt; font-weight: bold; color: %1; padding: 6px;")
                                 .arg(DialogStyle::kPrimary));
     payableLayout->addWidget(payableLabel_);
+
+    discountInfoLabel_ = new QLabel("", payableBox);
+    discountInfoLabel_->setAlignment(Qt::AlignCenter);
+    discountInfoLabel_->setStyleSheet("font-size: 10pt; color: #16A34A; font-weight: bold;");
+    discountInfoLabel_->setVisible(false);
+    payableLayout->addWidget(discountInfoLabel_);
+
     mainLayout->addWidget(payableBox);
 
-    // 2. Payment Mode selection (Radio buttons)
+    // 2. Special Discount button
+    auto* discountLayout = new QHBoxLayout();
+    specialDiscountBtn_ = new QPushButton("Apply Special Discount...", this);
+    specialDiscountBtn_->setStyleSheet("QPushButton { background-color: #F8FAFC; border: 1px solid #CBD5E1; color: #334155; padding: 6px 12px; font-weight: bold; border-radius: 4px; }"
+                                       "QPushButton:hover { background-color: #E2E8F0; }");
+    connect(specialDiscountBtn_, &QPushButton::clicked, this, &PaymentDialog::onSpecialDiscountClicked);
+    discountLayout->addWidget(specialDiscountBtn_);
+    discountLayout->addStretch();
+    mainLayout->addLayout(discountLayout);
+
+    // 3. Payment Mode selection (Radio buttons)
     auto* modeBox = new QGroupBox("Select Payment Mode", this);
     auto* modeLayout = new QHBoxLayout(modeBox);
     modeGroup_ = new QButtonGroup(this);
@@ -85,7 +83,7 @@ void PaymentDialog::setupUi() {
     cardRadio_ = new QRadioButton("Card", modeBox);
     walletRadio_ = new QRadioButton("Digital Wallet", modeBox);
 
-    cashRadio_->setChecked(true);
+    cashRadio_->setChecked(true); // Cash pre-selected as per spec
     modeGroup_->addButton(cashRadio_, static_cast<int>(PaymentMode::Cash));
     modeGroup_->addButton(cardRadio_, static_cast<int>(PaymentMode::Card));
     modeGroup_->addButton(walletRadio_, static_cast<int>(PaymentMode::Wallet));
@@ -95,92 +93,85 @@ void PaymentDialog::setupUi() {
     modeLayout->addWidget(walletRadio_);
     mainLayout->addWidget(modeBox);
 
-    connect(modeGroup_, &QButtonGroup::idClicked, this, [this](int id) { onPaymentModeChanged(id); });
+    connect(modeGroup_, &QButtonGroup::idClicked, this, &PaymentDialog::onPaymentModeChanged);
 
-    // 3. Cash details container (Tendered amount + Change Due)
+    // 4. Cash details container (Tendered amount + Change Due)
     cashContainer_ = new QWidget(this);
-    auto* cashForm = new QFormLayout(cashContainer_);
-    cashForm->setContentsMargins(0, 0, 0, 0);
-    cashForm->setSpacing(10);
+    auto* cashLayout = new QFormLayout(cashContainer_);
+    cashLayout->setContentsMargins(0, 0, 0, 0);
 
     tenderedEdit_ = new QLineEdit(cashContainer_);
-    tenderedEdit_->setPlaceholderText("Enter amount received in PKR (e.g. 500.00)");
-    connect(tenderedEdit_, &QLineEdit::textChanged, this, [this](const QString& text) { onTenderedTextChanged(text); });
+    tenderedEdit_->setPlaceholderText("0.00");
+    // Pre-fill amount received with exact payable amount as required by spec
+    tenderedEdit_->setText(QString::fromStdString(formatMoney(currentPayable_)));
 
-    changeLabel_ = new QLabel("0.00 PKR", cashContainer_);
-    changeLabel_->setStyleSheet(QString("font-size: 13pt; font-weight: bold; color: %1;")
+    changeLabel_ = new QLabel(guiFormatMoney(0), cashContainer_);
+    changeLabel_->setStyleSheet(QString("font-weight: bold; font-size: 13pt; color: %1;")
                                 .arg(DialogStyle::kSuccess));
 
-    cashForm->addRow("Amount Received:", tenderedEdit_);
-    cashForm->addRow("Change Due:", changeLabel_);
+    cashLayout->addRow("Amount Received (PKR):", tenderedEdit_);
+    cashLayout->addRow("Change Returned:", changeLabel_);
     mainLayout->addWidget(cashContainer_);
 
-    // 4. Merchant Name container (for Card / Wallet)
+    connect(tenderedEdit_, &QLineEdit::textChanged, this, &PaymentDialog::onTenderedTextChanged);
+
+    // 5. Merchant container (Card & Wallet only)
     merchantContainer_ = new QWidget(this);
-    auto* merchantForm = new QFormLayout(merchantContainer_);
-    merchantForm->setContentsMargins(0, 0, 0, 0);
-    merchantForm->setSpacing(10);
+    auto* merchantLayout = new QFormLayout(merchantContainer_);
+    merchantLayout->setContentsMargins(0, 0, 0, 0);
 
     merchantEdit_ = new QLineEdit(merchantContainer_);
-    merchantEdit_->setPlaceholderText("e.g. Meezan Bank, EasyPaisa, JazzCash");
-    merchantForm->addRow("Merchant Name:", merchantEdit_);
+    merchantEdit_->setPlaceholderText("e.g. HBL, Meezan, Easypaisa, JazzCash");
+    merchantLayout->addRow("Merchant / Network:", merchantEdit_);
     mainLayout->addWidget(merchantContainer_);
 
-    // 5. Validation error display
+    // 6. Error Label
     errorLabel_ = new QLabel(this);
-    errorLabel_->setStyleSheet(QString("color: %1; font-weight: bold; font-size: 10pt;").arg(DialogStyle::kDanger));
-    errorLabel_->setWordWrap(true);
-    errorLabel_->hide();
+    errorLabel_->setStyleSheet("color: #DC2626; font-weight: bold;");
+    errorLabel_->setVisible(false);
     mainLayout->addWidget(errorLabel_);
 
-    // 6. Action buttons (Confirm Payment & Cancel)
+    // 7. Buttons (Confirm / Cancel)
     auto* btnLayout = new QHBoxLayout();
-    btnLayout->setSpacing(12);
+    btnLayout->addStretch();
 
     cancelBtn_ = new QPushButton("Cancel", this);
-    cancelBtn_->setObjectName("cancelBtn");
-    connect(cancelBtn_, &QPushButton::clicked, this, &QDialog::reject);
-
     confirmBtn_ = new QPushButton("Confirm Payment", this);
-    confirmBtn_->setObjectName("confirmBtn");
-    confirmBtn_->setDefault(true);
-    connect(confirmBtn_, &QPushButton::clicked, this, [this]() { onConfirmClicked(); });
+    confirmBtn_->setDefault(true); // Enter key confirms payment as per spec
 
     btnLayout->addWidget(cancelBtn_);
     btnLayout->addWidget(confirmBtn_);
     mainLayout->addLayout(btnLayout);
 
-    // Tab ordering
-    setTabOrder(cashRadio_, cardRadio_);
-    setTabOrder(cardRadio_, walletRadio_);
-    setTabOrder(walletRadio_, tenderedEdit_);
-    setTabOrder(tenderedEdit_, merchantEdit_);
-    setTabOrder(merchantEdit_, confirmBtn_);
-    setTabOrder(confirmBtn_, cancelBtn_);
-}
-
-void PaymentDialog::onPaymentModeChanged(int) {
-    errorLabel_->hide();
-    updateModeFields();
+    connect(cancelBtn_, &QPushButton::clicked, this, &QDialog::reject);
+    connect(confirmBtn_, &QPushButton::clicked, this, &PaymentDialog::onConfirmClicked);
+    connect(tenderedEdit_, &QLineEdit::returnPressed, this, &PaymentDialog::onConfirmClicked);
+    connect(merchantEdit_, &QLineEdit::returnPressed, this, &PaymentDialog::onConfirmClicked);
 }
 
 void PaymentDialog::updateModeFields() {
     PaymentMode mode = static_cast<PaymentMode>(modeGroup_->checkedId());
-    if (mode == PaymentMode::Cash) {
-        cashContainer_->show();
-        merchantContainer_->hide();
-        merchantEdit_->clear();
-        updateChangeCalculation();
+    bool isCash = (mode == PaymentMode::Cash);
+
+    cashContainer_->setVisible(isCash);
+    merchantContainer_->setVisible(!isCash);
+
+    if (isCash) {
         tenderedEdit_->setFocus();
+        tenderedEdit_->selectAll();
+        updateChangeCalculation();
     } else {
-        cashContainer_->hide();
-        merchantContainer_->show();
         merchantEdit_->setFocus();
     }
 }
 
+void PaymentDialog::onPaymentModeChanged(int) {
+    errorLabel_->setVisible(false);
+    updateModeFields();
+}
+
 void PaymentDialog::onTenderedTextChanged(const QString&) {
-    errorLabel_->hide();
+    errorLabel_->setVisible(false);
     updateChangeCalculation();
 }
 
@@ -188,44 +179,118 @@ void PaymentDialog::updateChangeCalculation() {
     Money tendered = 0;
     if (guiParseMoney(tenderedEdit_->text(), tendered)) {
         tenderedAmount_ = tendered;
-        // Delegate cash change math to Pricing service (GUI does NO financial math)
-        changeAmount_ = changeDue(payableAmount_, tendered);
+        // Pure financial calculation via core changeDue()
+        changeAmount_ = changeDue(currentPayable_, tenderedAmount_);
         changeLabel_->setText(guiFormatMoney(changeAmount_));
+        if (tenderedAmount_ < currentPayable_) {
+            changeLabel_->setStyleSheet("font-weight: bold; font-size: 13pt; color: #DC2626;");
+        } else {
+            changeLabel_->setStyleSheet(QString("font-weight: bold; font-size: 13pt; color: %1;")
+                                        .arg(DialogStyle::kSuccess));
+        }
     } else {
         tenderedAmount_ = 0;
         changeAmount_ = 0;
-        changeLabel_->setText("0.00 PKR");
+        changeLabel_->setText(guiFormatMoney(0));
+    }
+}
+
+void PaymentDialog::onSpecialDiscountClicked() {
+    // If cashier: requires manager approval
+    if (!isManager_) {
+        bool approved = false;
+        if (approvalCallback_) {
+            approved = approvalCallback_();
+        } else {
+            // Placeholder PIN check until M1's ApprovalDialog is merged
+            bool ok = false;
+            QString pin = QInputDialog::getText(this, "Manager Approval Required",
+                                                "Cashier requires Manager PIN to apply special discount:\nEnter Manager PIN:",
+                                                QLineEdit::Password, "", &ok);
+            if (ok && pin == "1234") {
+                approved = true;
+            } else if (ok) {
+                QMessageBox::warning(this, "Approval Failed", "Incorrect Manager PIN.");
+                return;
+            }
+        }
+
+        if (!approved) {
+            return;
+        }
+        specialApproved_ = true;
+    } else {
+        specialApproved_ = true;
+    }
+
+    bool ok = false;
+    double percentInput = QInputDialog::getDouble(
+        this, "Apply Special Discount",
+        "Enter Special Discount Percentage (Maximum 8.00%):",
+        specialPercent_ / 100.0, 0.0, 8.0, 2, &ok
+    );
+
+    if (ok) {
+        Percent p = static_cast<Percent>(percentInput * 100.0 + 0.5);
+        OperationResult valRes = SpecialDiscountRule::validatePercent(p);
+        if (!valRes.success) {
+            QMessageBox::warning(this, "Invalid Discount", QString::fromStdString(valRes.message));
+            return;
+        }
+
+        specialPercent_ = p;
+        recalculateTotals();
+    }
+}
+
+void PaymentDialog::recalculateTotals() {
+    if (specialPercent_ > 0) {
+        Money discAmt = BillingMath::percentOf(basePayableAmount_, specialPercent_);
+        currentPayable_ = (basePayableAmount_ > discAmt) ? (basePayableAmount_ - discAmt) : 0;
+        discountInfoLabel_->setText(QString("Special Discount: %1% (-%2)")
+                                    .arg(QString::number(specialPercent_ / 100.0, 'f', 2))
+                                    .arg(guiFormatMoney(discAmt)));
+        discountInfoLabel_->setVisible(true);
+    } else {
+        currentPayable_ = basePayableAmount_;
+        discountInfoLabel_->setVisible(false);
+    }
+
+    payableLabel_->setText(guiFormatMoney(currentPayable_));
+    if (cashRadio_->isChecked()) {
+        tenderedEdit_->setText(QString::fromStdString(formatMoney(currentPayable_)));
+        updateChangeCalculation();
     }
 }
 
 void PaymentDialog::onConfirmClicked() {
-    errorLabel_->hide();
+    errorLabel_->setVisible(false);
     PaymentMode mode = static_cast<PaymentMode>(modeGroup_->checkedId());
 
-    if (mode == PaymentMode::Card || mode == PaymentMode::Wallet) {
+    if (mode == PaymentMode::Cash) {
+        if (!guiParseMoney(tenderedEdit_->text(), tenderedAmount_)) {
+            errorLabel_->setText("Please enter a valid cash amount.");
+            errorLabel_->setVisible(true);
+            return;
+        }
+
+        if (tenderedAmount_ < currentPayable_) {
+            errorLabel_->setText("Amount received is less than the payable amount (" +
+                                 guiFormatMoney(currentPayable_) + ").");
+            errorLabel_->setVisible(true);
+            return;
+        }
+    } else {
+        // Card or Wallet
         QString merchant = merchantEdit_->text().trimmed();
         if (merchant.isEmpty()) {
-            errorLabel_->setText("Merchant name is required for card/wallet payment.");
-            errorLabel_->show();
+            errorLabel_->setText("Please enter the merchant / network name.");
+            errorLabel_->setVisible(true);
             merchantEdit_->setFocus();
             return;
         }
-    } else if (mode == PaymentMode::Cash) {
-        Money tendered = 0;
-        if (!guiParseMoney(tenderedEdit_->text(), tendered)) {
-            errorLabel_->setText("Please enter a valid cash amount.");
-            errorLabel_->show();
-            tenderedEdit_->setFocus();
-            return;
-        }
-        if (tendered < payableAmount_) {
-            errorLabel_->setText("Tendered amount must be equal to or greater than the amount due.");
-            errorLabel_->show();
-            tenderedEdit_->setFocus();
-            return;
-        }
-        tenderedAmount_ = tendered;
-        changeAmount_ = changeDue(payableAmount_, tendered);
+        tenderedAmount_ = currentPayable_;
+        changeAmount_ = 0;
     }
 
     accept();
@@ -234,11 +299,10 @@ void PaymentDialog::onConfirmClicked() {
 PaymentInfo PaymentDialog::paymentInfo() const {
     PaymentInfo info;
     info.mode = static_cast<PaymentMode>(modeGroup_->checkedId());
-    if (info.mode == PaymentMode::Card || info.mode == PaymentMode::Wallet) {
-        info.merchant = merchantEdit_->text().trimmed().toStdString();
-    } else {
-        info.merchant.clear();
-    }
+    info.merchant = (info.mode == PaymentMode::Cash) ? "" : merchantEdit_->text().trimmed().toStdString();
+    info.received = tenderedAmount_;
+    info.specialPercent = specialPercent_;
+    info.specialApproved = specialApproved_;
     return info;
 }
 
@@ -249,4 +313,3 @@ Money PaymentDialog::tenderedAmount() const {
 Money PaymentDialog::changeAmount() const {
     return changeAmount_;
 }
-
