@@ -1,4 +1,5 @@
 #include "ProductsPage.h"
+#include "CameraPanel.h"
 #include "DialogStyle.h"
 #include "ProductEditorDialog.h"
 #include "ProductInfoDialog.h"
@@ -6,6 +7,7 @@
 
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QHideEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -21,7 +23,6 @@ ProductsPage::ProductsPage(ProductCatalog& catalog, CategoryStore& categories,
     : QWidget(parent), catalog_(catalog), categories_(categories), path_(productPath)
 {
     setAttribute(Qt::WA_StyledBackground, true);
-    
     setStyleSheet(DialogStyle::dialogStyleSheet());
 
     table_ = new QTableWidget(0, 8);
@@ -34,7 +35,7 @@ ProductsPage::ProductsPage(ProductCatalog& catalog, CategoryStore& categories,
     table_->horizontalHeader()->setStretchLastSection(true);
 
     search_ = new QLineEdit;
-    search_->setPlaceholderText("Type or scan a barcode to find a product");
+    search_->setPlaceholderText("Type or scan a barcode, press Enter to view the product");
 
     auto* addBtn = new QPushButton("Add product");
     addBtn->setObjectName("confirmBtn");
@@ -42,25 +43,40 @@ ProductsPage::ProductsPage(ProductCatalog& catalog, CategoryStore& categories,
     editBtn->setObjectName("closeBtn");
     auto* detailsBtn = new QPushButton("Details");
     detailsBtn->setObjectName("closeBtn");
+    cameraBtn_ = new QPushButton("Start camera");
+    cameraBtn_->setObjectName("closeBtn");
+
+    camera_ = new CameraPanel;
+    camera_->setMinimumWidth(360);
+    camera_->hide();
 
     status_ = new QLabel;
 
     auto* top = new QHBoxLayout;
     top->addWidget(search_, 1);
+    top->addWidget(cameraBtn_);
     top->addWidget(addBtn);
     top->addWidget(editBtn);
     top->addWidget(detailsBtn);
 
+    auto* body = new QHBoxLayout;
+    body->addWidget(table_, 1);
+    body->addWidget(camera_);
+
     auto* layout = new QVBoxLayout(this);
     layout->addLayout(top);
-    layout->addWidget(table_, 1);
+    layout->addLayout(body, 1);
     layout->addWidget(status_);
 
     connect(addBtn, &QPushButton::clicked, this, &ProductsPage::onAdd);
     connect(editBtn, &QPushButton::clicked, this, &ProductsPage::onEdit);
     connect(detailsBtn, &QPushButton::clicked, this, &ProductsPage::onDetails);
+    connect(cameraBtn_, &QPushButton::clicked, this, &ProductsPage::onToggleCamera);
     connect(table_, &QTableWidget::cellDoubleClicked, this, [this](int, int) { onEdit(); });
     connect(search_, &QLineEdit::textChanged, this, &ProductsPage::onSearch);
+    connect(search_, &QLineEdit::returnPressed, this, &ProductsPage::onSearchEnter);
+    connect(camera_, &CameraPanel::barcodeScanned, this, &ProductsPage::onBarcodeScanned);
+    connect(camera_, &CameraPanel::cameraMessage, this, [this](const QString& m) { status_->setText(m); });
 
     refresh();
 }
@@ -83,6 +99,19 @@ void ProductsPage::refresh()
     status_->setText(QString::number(items.size()) + " products");
 }
 
+void ProductsPage::hideEvent(QHideEvent* event)
+{
+    stopCamera();
+    QWidget::hideEvent(event);
+}
+
+void ProductsPage::stopCamera()
+{
+    if (camera_->isRunning()) camera_->stop();
+    camera_->hide();
+    cameraBtn_->setText("Start camera");
+}
+
 const Product* ProductsPage::selectedProduct() const
 {
     const int row = table_->currentRow();
@@ -92,6 +121,7 @@ const Product* ProductsPage::selectedProduct() const
 
 void ProductsPage::onAdd()
 {
+    stopCamera();
     ProductEditorDialog dlg(catalog_, categories_, path_, nullptr, this);
     if (dlg.exec() == QDialog::Accepted) refresh();
 }
@@ -100,6 +130,7 @@ void ProductsPage::onEdit()
 {
     const Product* p = selectedProduct();
     if (!p) { status_->setText("Select a product first."); return; }
+    stopCamera();
     Product copy = *p;      // dialog may change the catalog, so don't keep the pointer
     ProductEditorDialog dlg(catalog_, categories_, path_, &copy, this);
     if (dlg.exec() == QDialog::Accepted) refresh();
@@ -109,8 +140,11 @@ void ProductsPage::onDetails()
 {
     const Product* p = selectedProduct();
     if (!p) { status_->setText("Select a product first."); return; }
-    ProductInfoDialog dlg(*p, this);
+    Product copy = *p;
+    busy_ = true;
+    ProductInfoDialog dlg(copy, this);
     dlg.exec();
+    busy_ = false;
 }
 
 void ProductsPage::onSearch(const QString& text)
@@ -126,4 +160,44 @@ void ProductsPage::onSearch(const QString& text)
         }
     }
     status_->setText("No product with this barcode.");
+}
+
+void ProductsPage::onSearchEnter()
+{
+    const QString t = search_->text().trimmed();
+    if (t.isEmpty()) return;
+    if (showInfoForBarcode(t)) search_->clear();
+}
+
+void ProductsPage::onToggleCamera()
+{
+    if (camera_->isVisible()) {
+        stopCamera();
+        return;
+    }
+    camera_->show();
+    camera_->start();
+    cameraBtn_->setText("Stop camera");
+}
+
+void ProductsPage::onBarcodeScanned(const QString& code)
+{
+    if (busy_) return;                 // a dialog is already open
+    showInfoForBarcode(code);
+}
+
+bool ProductsPage::showInfoForBarcode(const QString& code)
+{
+    for (const Product& p : catalog_.all()) {
+        if (qs(p.barcode) == code) {
+            Product copy = p;
+            busy_ = true;
+            ProductInfoDialog dlg(copy, this);
+            dlg.exec();
+            busy_ = false;
+            return true;
+        }
+    }
+    status_->setText("No product with barcode " + code + ".");
+    return false;
 }
