@@ -113,6 +113,19 @@ int main() {
         CHECK_EQ(store2.orders()[0].lines.size(), static_cast<size_t>(1));
         CHECK_EQ(store2.orders()[0].lines[0].productId, std::string("101"));
         CHECK_EQ(store2.orders()[0].lines[0].quantity, 2000);
+
+        // Test: findById() found & not found
+        auto found = store2.findById("00000714");
+        CHECK(found.has_value());
+        CHECK_EQ(found->customerName, std::string("Ali Khan"));
+        CHECK_EQ(found->lines.size(), static_cast<size_t>(1));
+        CHECK(!store2.findById("99999999").has_value());
+
+        // Test: nextOrderId remains 8 digits and unique after reload
+        std::string nextId = store2.nextOrderId(25);
+        CHECK_EQ(nextId.length(), static_cast<size_t>(8));
+        CHECK_EQ(nextId, std::string("00000825"));
+        CHECK(!store2.findById(nextId).has_value());
     }
 
     std::filesystem::remove(testOrderPath);

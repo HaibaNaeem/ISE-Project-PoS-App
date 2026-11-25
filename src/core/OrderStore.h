@@ -1,5 +1,6 @@
 #pragma once
 // OWNER: Member 3. Order.txt + OrderDetail.txt are always loaded and saved together.
+#include <optional>
 #include <string>
 #include <vector>
 #include "CommonTypes.h"
@@ -25,6 +26,7 @@ public:
 
     std::vector<Order>& orders() { return orders_; }
     const std::vector<Order>& orders() const { return orders_; }
+    std::optional<Order> findById(const std::string& orderId) const;
 
     // Static helper methods for testing and pure logic
     static std::string generateNextOrderId(const std::vector<Order>& existingOrders, int dayOfMonth);

@@ -80,10 +80,23 @@ int main() {
     auto r8 = manager.addByBarcode("100001", -1000);
     CHECK(!r8.success);
 
-    // Test: no active order rejected
+    // Test: Increment 3 - addByBarcode auto-starts an order if none is active (Walk-in)
     OrderManager manager2(catalog, nullptr, dateTimeProvider);
+    // Invalid scan must NOT auto-start an order
+    CHECK(!manager2.addByBarcode("999999", 1000).success);
+    CHECK(!manager2.current().has_value());
+    // Valid scan auto-starts an order
     auto r9 = manager2.addByBarcode("100001", 1000);
-    CHECK(!r9.success);
+    CHECK(r9.success);
+    CHECK(manager2.current().has_value());
+    CHECK_EQ(manager2.current()->customerName, std::string("Walk-in"));
+
+    // Test: setCustomer turns empty/blank name into "Walk-in"
+    CHECK(manager2.setCustomer("   ", "0300111222").success);
+    CHECK_EQ(manager2.current()->customerName, std::string("Walk-in"));
+    CHECK_EQ(manager2.current()->customerContact, std::string("0300111222"));
+    CHECK(manager2.setCustomer("Sara", "0300999888").success);
+    CHECK_EQ(manager2.current()->customerName, std::string("Sara"));
 
     // Test: zero-stock product rejected
     auto r10 = manager.addByBarcode("100003", 1000);
@@ -189,6 +202,81 @@ int main() {
         auto ms7 = managerWithStore.cancel();
         CHECK(ms7.success);
         CHECK_EQ(mockStore.saveCallCount, 7);
+    }
+
+    // Increment 3 Test: resume swaps (non-empty current held, empty current dropped)
+    {
+        OrderManager mgr(catalog, nullptr, dateTimeProvider);
+        mgr.startOrder("First", "111");
+        mgr.addByBarcode("100001", 1000);
+        std::string firstId = mgr.current()->id;
+        CHECK(mgr.hold().success);
+
+        // Start a non-empty second order and resume first -> second must be held
+        mgr.startOrder("Second", "222");
+        mgr.addByBarcode("100001", 2000);
+        std::string secondId = mgr.current()->id;
+        CHECK(mgr.resume(firstId).success);
+        CHECK_EQ(mgr.current()->id, firstId);
+        CHECK_EQ(mgr.heldOrders().size(), static_cast<size_t>(1));
+        CHECK_EQ(mgr.heldOrders()[0].id, secondId);
+
+        // Start an empty third order and resume second -> empty third order is dropped (NOT held)
+        CHECK(mgr.hold().success); // now both first and second are held
+        mgr.startOrder("Empty", "333");
+        std::string emptyId = mgr.current()->id;
+        CHECK(mgr.resume(secondId).success);
+        CHECK_EQ(mgr.current()->id, secondId);
+        CHECK_EQ(mgr.heldOrders().size(), static_cast<size_t>(1));
+        CHECK_EQ(mgr.heldOrders()[0].id, firstId);
+        CHECK(mgr.heldOrders()[0].id != emptyId);
+    }
+
+    // Increment 3 Test: paid order edit stock check & discard
+    // Stock 10 after selling 2 -> change to 5 accepted, to 12 accepted, to 13 rejected; discard restores.
+    {
+        ProductCatalog editCatalog({
+            {"P010", "555010", "P010", "Edit Item", MeasureUnit::Count, 10000, 0, 0, 10000, ""} // remaining stock: 10
+        });
+        OrderStore store;
+        Order paidOrder;
+        paidOrder.id = "00000125";
+        paidOrder.date = "2026-11-22";
+        paidOrder.time = "12:00:00";
+        paidOrder.customerName = "Paid Buyer";
+        paidOrder.status = OrderStatus::Paid;
+        paidOrder.paymentAmount = 20000;
+        paidOrder.mode = PaymentMode::Cash;
+        paidOrder.lines.push_back(OrderLine{"P010", "555010", 2000}); // sold 2
+        store.orders().push_back(paidOrder);
+
+        OrderManager editMgr(editCatalog, &store, dateTimeProvider);
+        CHECK(!editMgr.original().has_value());
+        CHECK(editMgr.beginPaidEdit(paidOrder).success);
+        CHECK(editMgr.original().has_value());
+        CHECK_EQ(editMgr.original()->lines[0].quantity, 2000);
+
+        // Change qty to 5 -> accepted
+        CHECK(editMgr.setQuantity("P010", 5000).success);
+        // Change qty to 12 (10 + 2) -> accepted
+        CHECK(editMgr.setQuantity("P010", 12000).success);
+        // Change qty to 13 -> rejected
+        CHECK(!editMgr.setQuantity("P010", 13000).success);
+        CHECK_EQ(editMgr.current()->lines[0].quantity, 12000);
+
+        // Hold on edited paid order is refused
+        CHECK(!editMgr.hold().success);
+
+        // Store was NOT modified while editing in memory
+        CHECK_EQ(store.findById("00000125")->lines[0].quantity, 2000);
+        CHECK(store.findById("00000125")->status == OrderStatus::Paid);
+
+        // Cancel on edited paid order discards, never archives
+        CHECK(editMgr.cancel().success);
+        CHECK(!editMgr.current().has_value());
+        CHECK(!editMgr.original().has_value());
+        CHECK(store.findById("00000125")->status == OrderStatus::Paid);
+        CHECK_EQ(store.findById("00000125")->lines[0].quantity, 2000);
     }
 
     return testSummary("test_order_manager");

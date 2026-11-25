@@ -189,6 +189,15 @@ OperationResult OrderStore::save(const Order& order) {
     return save();
 }
 
+std::optional<Order> OrderStore::findById(const std::string& orderId) const {
+    for (const auto& ord : orders_) {
+        if (ord.id == orderId) {
+            return ord;
+        }
+    }
+    return std::nullopt;
+}
+
 std::string OrderStore::nextOrderId(int dayOfMonth) const {
     return generateNextOrderId(orders_, dayOfMonth);
 }
