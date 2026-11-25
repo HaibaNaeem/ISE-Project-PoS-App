@@ -1,119 +1,173 @@
 #include "RecordFormat.h"
-#include <filesystem>
+
+#include <cstdio>
 #include <fstream>
+#include <string>
+#include <vector>
 
-OperationResult splitRecord(const std::string& line, int lineNumber, std::vector<std::string>& fields)
+// Text with spaces is wrapped in quotes. Text without spaces is written as is.
+// Empty text is written as "-".
+std::string quoteField(const std::string& text)
 {
-    OperationResult r;
-    auto fail = [&](const std::string& m) {
-        r.success = false;
-        r.message = "line " + std::to_string(lineNumber) + ": " + m;
-        return r;
-    };
+    if (text.empty())
+        return "-";
 
-    std::vector<std::pair<std::string, bool>> tok;   // text, quoted?
-    size_t i = 0, n = line.size();
-    while (i < n) {
-        if (line[i] == ' ' || line[i] == '\t') { ++i; continue; }
-        if (line[i] == '"') {
-            size_t j = line.find('"', i + 1);
-            if (j == std::string::npos) return fail("missing closing quote");
-            tok.push_back({line.substr(i + 1, j - i - 1), true});
-            i = j + 1;
-            if (i < n && line[i] != ' ' && line[i] != '\t') return fail("text right after a closing quote");
-        } else {
-            size_t j = i;
-            while (j < n && line[j] != ' ' && line[j] != '\t') {
-                if (line[j] == '"') return fail("unexpected quote inside a word");
-                ++j;
-            }
-            tok.push_back({line.substr(i, j - i), false});
-            i = j;
+    bool needsQuotes = false;
+    for (char c : text) {
+        if (c == ' ' || c == '\t' || c == '"' || c == '\\') {
+            needsQuotes = true;
+            break;
         }
     }
-    if (tok.empty() || tok.back().second || tok.back().first != "#")
-        return fail("record must end with #");
-    tok.pop_back();
 
+    if (!needsQuotes)
+        return text;
+
+    std::string out = "\"";
+    for (char c : text) {
+        if (c == '"' || c == '\\')
+            out += '\\';
+        out += c;
+    }
+    out += '"';
+    return out;
+}
+std::string writeRecord(const std::vector<std::string>& fields)
+{
+    std::string out;
+    for (const auto& f : fields) {
+        out += f;
+        out += ' ';
+    }
+    out += '#';
+    return out;
+}
+
+OperationResult splitRecord(
+    const std::string& line,
+    int lineNumber,
+    std::vector<std::string>& fields)
+{
+    OperationResult r;
     fields.clear();
-    for (auto& t : tok) fields.push_back(t.first);
+
+    const std::size_t n = line.size();
+    std::size_t i = 0;
+    bool sawEnd = false;
+
+    while (i < n) {
+        while (i < n && (line[i] == ' ' || line[i] == '\t')) ++i;
+        if (i >= n) break;
+
+        if (line[i] == '"') {
+            std::string cur;
+            ++i;
+            bool closed = false;
+            while (i < n) {
+                if (line[i] == '\\' && i + 1 < n) {
+                    cur += line[i + 1];
+                    i += 2;
+                } else if (line[i] == '"') {
+                    closed = true;
+                    ++i;
+                    break;
+                } else {
+                    cur += line[i++];
+                }
+            }
+            if (!closed) {
+                r.message = "line " + std::to_string(lineNumber)
+                          + ": unterminated quote";
+                return r;
+            }
+            fields.push_back(cur);
+        } else {
+            std::string cur;
+            while (i < n && line[i] != ' ' && line[i] != '\t')
+                cur += line[i++];
+            if (cur == "#") { sawEnd = true; break; }
+            if (cur == "-") cur.clear();   // "-" means empty field
+            fields.push_back(cur);
+        }
+    }
+
+    if (!sawEnd) {
+        r.message = "line " + std::to_string(lineNumber)
+                  + ": missing final #";
+        return r;
+    }
+
     r.success = true;
     return r;
 }
 
-std::string quoteField(const std::string& text) { return "\"" + text + "\""; }
-
-std::string writeRecord(const std::vector<std::string>& fields)
-{
-    std::string s;
-    for (auto& f : fields) s += f + " ";
-    return s + "#";
-}
-
-OperationResult readLines(const std::string& path, std::vector<std::string>& lines)
+OperationResult readLines(
+    const std::string& path,
+    std::vector<std::string>& lines)
 {
     OperationResult r;
     lines.clear();
+
     std::ifstream in(path, std::ios::binary);
-    if (!in) { r.message = "File not found: " + path; return r; }
+    if (!in) {
+        r.message = "Cannot open " + path;
+        return r;
+    }
+
     std::string line;
     while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.find_first_not_of(" \t") == std::string::npos) continue;   // blank line skip
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+
+        if (line.find_first_not_of(" \t") == std::string::npos)
+            continue;   // skip blank lines
+
         lines.push_back(line);
     }
+
     r.success = true;
     return r;
 }
 
-void FileTransaction::add(const std::string& targetPath, const std::string& newContent)
+void FileTransaction::add(
+    const std::string& targetPath,
+    const std::string& newContent)
 {
-    entries_.push_back({targetPath, newContent});
+    entries_.push_back({ targetPath, newContent });
 }
 
 OperationResult FileTransaction::commit()
 {
-    namespace fs = std::filesystem;
     OperationResult r;
-    std::error_code ec;
-    auto removeTmp = [&] { for (auto& e : entries_) fs::remove(e.target + ".tmp", ec); };
 
-    // 1. sab .tmp files likho
-    for (auto& e : entries_) {
-        std::ofstream out(e.target + ".tmp", std::ios::binary);
-        out << e.content;
+    // Step 1: write every file to a temp name first.
+    bool ok = !simulateFailure_;
+
+    for (std::size_t k = 0; ok && k < entries_.size(); ++k) {
+        std::ofstream out(entries_[k].target + ".tmp",
+                          std::ios::binary | std::ios::trunc);
+        out << entries_[k].content;
         out.close();
-        if (!out) { removeTmp(); r.message = "Cannot write " + e.target; return r; }
+        if (!out) ok = false;
     }
 
-    // test ke liye jaan-boojh kar fail
-    if (simulateFailure_) {
-        removeTmp();
-        r.message = "Saving failed (simulated). No file was changed.";
+    if (!ok) {
+        for (const auto& e : entries_)
+            std::remove((e.target + ".tmp").c_str());
+        r.message = "Write failed. No file was changed.";
         return r;
     }
 
-    // 2. swap: purani file .bak mein, phir .tmp ko asli naam do
-    size_t done = 0;
-    bool ok = true;
-    for (; done < entries_.size(); ++done) {
-        auto& t = entries_[done].target;
-        if (fs::exists(t)) { fs::rename(t, t + ".bak", ec); if (ec) { ok = false; break; } }
-        fs::rename(t + ".tmp", t, ec);
-        if (ec) { ok = false; break; }
-    }
-
-    if (!ok) {   // jo replace ho chuki thin unhe wapas karo
-        for (size_t k = 0; k <= done && k < entries_.size(); ++k) {
-            auto& t = entries_[k].target;
-            if (fs::exists(t + ".bak")) { fs::remove(t, ec); fs::rename(t + ".bak", t, ec); }
+    // Step 2: all temp files are ready, now replace the real files.
+    for (const auto& e : entries_) {
+        std::remove(e.target.c_str());
+        if (std::rename((e.target + ".tmp").c_str(), e.target.c_str()) != 0) {
+            r.message = "Could not replace " + e.target;
+            return r;
         }
-        removeTmp();
-        r.message = "Saving failed. No file was changed.";
-        return r;
     }
 
-    for (auto& e : entries_) fs::remove(e.target + ".bak", ec);
+    entries_.clear();
     r.success = true;
     r.message = "Saved.";
     return r;
