@@ -36,9 +36,6 @@ OperationResult OrderEditService::open(OrderManager& manager,
             return {false, "Archived orders cannot be reopened or edited."};
 
         case OrderStatus::Paid: {
-            if (!managerApproved) {
-                return {false, "Manager approval is required to edit a paid order."};
-            }
             const std::string billDate = findBillDateForOrder(bills, order);
             if (!EditPolicy::withinEditWindow(billDate, today)) {
                 const std::string until = EditPolicy::editWindowUntilDate(billDate);
@@ -46,6 +43,9 @@ OperationResult OrderEditService::open(OrderManager& manager,
                     return {false, "Paid order edit window expired (editable until " + until + ")."};
                 }
                 return {false, "Paid order is outside the 7-day edit window."};
+            }
+            if (!managerApproved) {
+                return {false, "Manager approval is required to edit a paid order."};
             }
             return manager.beginPaidEdit(order);
         }

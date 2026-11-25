@@ -13,7 +13,9 @@ public:
     OrderStore(std::string orderPath, std::string detailPath);
 
     virtual OperationResult load();                      // in-progress orders become on-hold
+    OperationResult load(const std::string& orderPath, const std::string& detailPath);
     virtual OperationResult save() const;                // writes both files (not used by pay(); see serialize*)
+    OperationResult save(const std::string& orderPath, const std::string& detailPath) const;
     virtual OperationResult save(const Order& order);    // save / update a single order and persist
 
     std::string serializeOrders() const;         // whole Order.txt as text (used by CheckoutService)
