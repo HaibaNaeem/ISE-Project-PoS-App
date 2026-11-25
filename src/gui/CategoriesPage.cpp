@@ -16,6 +16,7 @@ QString qs(const std::string& s) { return QString::fromStdString(s); }
 CategoriesPage::CategoriesPage(CategoryStore& store, const std::string& path, QWidget* parent)
     : QWidget(parent), store_(store), path_(path)
 {
+    setAttribute(Qt::WA_StyledBackground, true);
     setStyleSheet(DialogStyle::dialogStyleSheet());
 
     table_ = new QTableWidget(0, 3);

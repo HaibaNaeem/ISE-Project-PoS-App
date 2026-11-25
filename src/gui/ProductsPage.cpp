@@ -20,6 +20,8 @@ ProductsPage::ProductsPage(ProductCatalog& catalog, CategoryStore& categories,
                            const std::string& productPath, QWidget* parent)
     : QWidget(parent), catalog_(catalog), categories_(categories), path_(productPath)
 {
+    setAttribute(Qt::WA_StyledBackground, true);
+    
     setStyleSheet(DialogStyle::dialogStyleSheet());
 
     table_ = new QTableWidget(0, 8);
