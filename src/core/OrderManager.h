@@ -1,45 +1,45 @@
 #pragma once
-#include "Order.h"
-#include "ProductCatalog.h"
-#include "OrderStore.h"
-#include "../services/CommonTypes.h"
-#include <optional>
-#include <vector>
-#include <string>
+// OWNER: Member 3. Shared contract (frozen). The order being recorded + held orders.
 #include <functional>
-
-// Forward declaration for OrderStore (optional dependency)
-class OrderStore;
+#include <optional>
+#include <string>
+#include <vector>
+#include "CommonTypes.h"
+#include "Order.h"
+#include "OrderStore.h"
+#include "ProductCatalog.h"
 
 class OrderManager {
 public:
-    // Constructor with injectable date/time function for deterministic tests
-    // Default uses system clock
-    OrderManager(const ProductCatalog& catalog,
-                 OrderStore* store = nullptr,
+    // store may be nullptr: then nothing is saved (use this in unit tests).
+    OrderManager(const ProductCatalog& catalog, OrderStore* store = nullptr,
                  std::function<std::string()> dateTimeProvider = nullptr);
 
-    OperationResult startOrder(const std::string& name, const std::string& contact);
-    OperationResult addByBarcode(const std::string& barcode, Quantity qty);
-    OperationResult setQuantity(const std::string& productId, Quantity qty);
+    OperationResult startOrder(const std::string& customerName, const std::string& customerContact);
+    OperationResult addByBarcode(const std::string& barcode, Quantity quantity);  // merges repeated scans, checks stock
+    OperationResult setQuantity(const std::string& productId, Quantity quantity);
     OperationResult removeLine(const std::string& productId);
     OperationResult hold();
     OperationResult resume(const std::string& orderId);
-    OperationResult cancel();
+    OperationResult cancel();                                  // status archived, stock unchanged
 
-    const std::optional<Order>& current() const;
+    const std::optional<Order>& current() const { return current_; }
     std::vector<Order> heldOrders() const;
 
+    // Used by CheckoutService after a successful payment: forget the current order.
+    void clearCurrent() { current_.reset(); }
+
+    // Tests can fix the date so Order IDs are predictable.
+    void setClock(std::function<DateTime()> clock) { clock_ = std::move(clock); }
+
 private:
-    // Pure function to generate next order ID (delegates to OrderStore helper)
-    std::string generateOrderId(int dayOfMonth) const;
+    DateTime getNow() const;
+    void syncCurrentToStore();
 
-    // Helper to get current date/time (uses injectable function or system clock)
-    std::string getCurrentDateTime() const;
-
-    const ProductCatalog& catalog_;
-    OrderStore* store_;  // Optional: may be null, skip saving if null
-    std::optional<Order> currentOrder_;
-    std::vector<Order> allOrders_;  // Keeps all orders (held/archived) in memory
-    std::function<std::string()> dateTimeProvider_;
+    const ProductCatalog* catalog_;
+    OrderStore* store_;
+    std::optional<Order> current_;
+    std::function<DateTime()> clock_;
+    std::function<std::string()> legacyClock_;
+    std::vector<Order> inMemoryOrders_;  // For standalone tests when store_ is nullptr
 };

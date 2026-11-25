@@ -1,21 +1,22 @@
-#include "../src/core/OrderStore.h"
-#include "../src/core/Order.h"
+#include "OrderStore.h"
+#include "Order.h"
 #include "TestHelpers.h"
-#include <iostream>
+#include <filesystem>
+#include <fstream>
 
 int main() {
     // Test: Order ID is 8 digits
     std::vector<Order> emptyOrders;
     std::string id1 = OrderStore::generateNextOrderId(emptyOrders, 15);
-    CHECK(id1.length() == 8, "Order ID is 8 digits");
-    CHECK(id1 == "00000115", "Empty list gives counter 000001 with day 15");
+    CHECK_EQ(id1.length(), static_cast<size_t>(8));
+    CHECK_EQ(id1, std::string("00000115"));
 
     // Test: correct day suffix
     std::string id2 = OrderStore::generateNextOrderId(emptyOrders, 5);
-    CHECK(id2.substr(6, 2) == "05", "Day suffix is correct (05)");
+    CHECK_EQ(id2.substr(6, 2), std::string("05"));
 
     std::string id3 = OrderStore::generateNextOrderId(emptyOrders, 31);
-    CHECK(id3.substr(6, 2) == "31", "Day suffix is correct (31)");
+    CHECK_EQ(id3.substr(6, 2), std::string("31"));
 
     // Test: counter increments
     std::vector<Order> orders;
@@ -25,11 +26,11 @@ int main() {
     orders.push_back(o1);
 
     std::string id4 = OrderStore::generateNextOrderId(orders, 15);
-    CHECK(id4 == "00000215", "Counter increments to 000002");
+    CHECK_EQ(id4, std::string("00000215"));
 
     orders.push_back(o1);  // Add another with same ID
     std::string id5 = OrderStore::generateNextOrderId(orders, 15);
-    CHECK(id5 == "00000215", "Counter still 000002 (max is 1)");
+    CHECK_EQ(id5, std::string("00000215"));
 
     // Test: IDs never repeat when archived/paid/on-hold orders exist
     Order o2;
@@ -43,7 +44,7 @@ int main() {
     orders.push_back(o3);
 
     std::string id6 = OrderStore::generateNextOrderId(orders, 20);
-    CHECK(id6 == "00000620", "Counter increments to 000006 (max was 5)");
+    CHECK_EQ(id6, std::string("00000620"));
 
     // Test: crash recovery - in-progress becomes on-hold
     std::vector<Order> orders2;
@@ -58,8 +59,8 @@ int main() {
     orders2.push_back(o5);
 
     OrderStore::recoverInProgressOrders(orders2);
-    CHECK(orders2[0].status == OrderStatus::OnHold, "in-progress becomes on-hold");
-    CHECK(orders2[1].status == OrderStatus::Paid, "paid order unchanged");
+    CHECK(orders2[0].status == OrderStatus::OnHold);
+    CHECK(orders2[1].status == OrderStatus::Paid);
 
     // Test: orphan helper
     std::vector<Order> orders3;
@@ -74,11 +75,48 @@ int main() {
     };
 
     auto orphans = OrderStore::findOrphanDetailLines(orders3, detailLines);
-    CHECK(orphans.size() == 1, "one orphan line found");
-    CHECK(orphans[0] == "00000215 102 234567 3", "correct orphan line");
+    CHECK_EQ(orphans.size(), static_cast<size_t>(1));
+    CHECK_EQ(orphans[0], std::string("00000215 102 234567 3"));
 
-    // TODO(after Member 2): round-trip, missing file, empty file, malformed row
+    // File round-trip test
+    std::string testOrderPath = "test_orders.txt";
+    std::string testDetailPath = "test_details.txt";
 
-    std::cout << "\nPassed: " << passed << "  Failed: " << failed << "\n";
-    return failed == 0 ? 0 : 1;
+    {
+        OrderStore store(testOrderPath, testDetailPath);
+        Order ord;
+        ord.id = "00000714";
+        ord.date = "2026-11-16";
+        ord.time = "14:05:09";
+        ord.customerName = "Ali Khan";
+        ord.customerContact = "";
+        ord.status = OrderStatus::InProgress; // will test crash recovery upon load
+        ord.paymentAmount = 0;
+        ord.mode = PaymentMode::None;
+        ord.merchant = "";
+        ord.lines.push_back(OrderLine{"101", "123456", 2000});
+        store.orders().push_back(ord);
+
+        auto r = store.save();
+        CHECK(r.success);
+    }
+
+    {
+        // Reload in new store instance
+        OrderStore store2(testOrderPath, testDetailPath);
+        auto r = store2.load();
+        CHECK(r.success);
+        CHECK_EQ(store2.orders().size(), static_cast<size_t>(1));
+        CHECK_EQ(store2.orders()[0].id, std::string("00000714"));
+        CHECK_EQ(store2.orders()[0].customerName, std::string("Ali Khan"));
+        CHECK(store2.orders()[0].status == OrderStatus::OnHold);
+        CHECK_EQ(store2.orders()[0].lines.size(), static_cast<size_t>(1));
+        CHECK_EQ(store2.orders()[0].lines[0].productId, std::string("101"));
+        CHECK_EQ(store2.orders()[0].lines[0].quantity, 2000);
+    }
+
+    std::filesystem::remove(testOrderPath);
+    std::filesystem::remove(testDetailPath);
+
+    return testSummary("test_order_store");
 }
