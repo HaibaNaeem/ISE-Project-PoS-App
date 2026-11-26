@@ -5,18 +5,36 @@
 #include <fstream>
 #include "TestHelpers.h"
 #include "Units.h"
+#include "DateText.h"
 #include "RecordFormat.h"
+#include "Role.h"
+#include "AccessPolicy.h"
+#include "ManagerAuth.h"
+#include "Category.h"
+#include "CategoryStore.h"
 #include "Product.h"
 #include "ProductCatalog.h"
+#include "BarcodeAllocator.h"
 #include "StockRules.h"
+#include "EditPolicy.h"
 #include "Order.h"
 #include "OrderStore.h"
 #include "OrderManager.h"
+#include "OrderEditService.h"
+#include "InventoryService.h"
 #include "Bill.h"
+#include "DiscountRules.h"
 #include "Pricing.h"
 #include "BillStore.h"
 #include "CheckoutService.h"
 #include "DataPaths.h"
+#include "Season.h"
+#include "SeasonStore.h"
+#include "SeasonService.h"
+#include "DateRange.h"
+#include "Report.h"
+#include "ReportRegistry.h"
+#include "Reports.h"
 
 namespace fs = std::filesystem;
 
@@ -55,9 +73,9 @@ static void testEnumHelpers() {
 }
 
 static void testCatalogInMemory() {
-    Product milk; milk.id = "101"; milk.barcode = "123456"; milk.acronym = "MILKP";
+    Product milk; milk.id = "101"; milk.barcode = "123456"; milk.categoryId = "12"; milk.acronym = "MILKP";
     milk.name = "Milk Powder 400g"; milk.unitPrice = 45000; milk.available = 12000;
-    Product rice; rice.id = "102"; rice.barcode = "234567"; rice.unit = MeasureUnit::Weight;
+    Product rice; rice.id = "102"; rice.barcode = "234567"; rice.categoryId = "23"; rice.unit = MeasureUnit::Weight;
     ProductCatalog cat({milk, rice});
     CHECK(cat.findByBarcode("123456").has_value());
     CHECK_EQ(cat.findByBarcode("123456")->name, std::string("Milk Powder 400g"));
@@ -75,6 +93,8 @@ static void testDataPaths() {
     removeFolder(root);
     fs::create_directories(root / "sample_data");
     { std::ofstream(root / "sample_data" / "Product.txt") << "sample product\n"; }
+    { std::ofstream(root / "sample_data" / "Seasons.txt") << "2026-11-20 2026-11-30 10.00 true #\n"; }
+    { std::ofstream(root / "sample_data" / "Settings.txt") << "manager_pin 1234 #\n"; }
 
     DataPaths paths(root.generic_string());
     OperationResult r = paths.ensureDataFolder();
@@ -83,8 +103,14 @@ static void testDataPaths() {
     CHECK(fs::exists(paths.orderFile()));
     CHECK(fs::exists(paths.orderDetailFile()));
     CHECK(fs::exists(paths.billFile()));
+    CHECK(fs::exists(paths.billDetailFile()));
+    CHECK(fs::exists(paths.categoryFile()));
+    CHECK(fs::exists(paths.seasonsFile()));
+    CHECK(fs::exists(paths.settingsFile()));
 
     CHECK_EQ(firstLine(paths.productFile()), std::string("sample product"));          // copied from sample_data
+    CHECK_EQ(firstLine(paths.seasonsFile()), std::string("2026-11-20 2026-11-30 10.00 true #"));
+    CHECK_EQ(firstLine(paths.settingsFile()), std::string("manager_pin 1234 #"));
     CHECK_EQ(fs::file_size(paths.orderFile()), std::uintmax_t(0));   // no sample -> empty file
 
     { std::ofstream(paths.productFile()) << "changed\n"; }
@@ -96,13 +122,14 @@ static void testDataPaths() {
 }
 
 static void testStubsLinkAndDoNotCrash() {
-    // Only checks that the stubs can be constructed and called. Real behaviour belongs in each owner's tests.
+    // Only checks that core classes can be constructed and called. Real behaviour belongs in each owner's tests.
     ProductCatalog cat;
     OrderStore orders("o.txt", "d.txt");
-    BillStore bills("b.txt");
+    BillStore bills("b.txt", "bd.txt");
     OrderManager manager(cat, &orders);
-    CheckoutService checkout(cat, orders, bills, "p.txt");
-    Bill b; Order o;
+    SeasonService seasons;
+    CheckoutService checkout(cat, orders, bills, "p.txt", seasons);
+    Order o;
     (void)buildBill(o, cat, "000000001");
     CHECK_EQ(changeDue(1000, 1500), Money(500));
     CHECK_EQ(changeDue(1000, 500), Money(0));

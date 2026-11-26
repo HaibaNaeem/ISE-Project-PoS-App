@@ -13,8 +13,9 @@ std::string DataPaths::orderFile() const        { return (fs::path(dataDir()) / 
 std::string DataPaths::orderDetailFile() const  { return (fs::path(dataDir()) / "OrderDetail.txt").generic_string(); }
 std::string DataPaths::billFile() const         { return (fs::path(dataDir()) / "Bill.txt").generic_string(); }
 std::string DataPaths::categoryFile() const     { return (fs::path(dataDir()) / "PCategory.txt").generic_string(); }
-// [WRITTEN BY MEMBER 4 on behalf of MEMBER 5 – minimal version so Member 4's billing work could build/test. Member 5: review, extend or replace; keep the agreed signatures.]
 std::string DataPaths::billDetailFile() const   { return (fs::path(dataDir()) / "BillDetail.txt").generic_string(); }
+std::string DataPaths::seasonsFile() const      { return (fs::path(dataDir()) / "Seasons.txt").generic_string(); }
+std::string DataPaths::settingsFile() const     { return (fs::path(dataDir()) / "Settings.txt").generic_string(); }
 
 std::string DataPaths::resolve(const std::string& relativePath) const {
     fs::path p(relativePath);
@@ -27,8 +28,16 @@ OperationResult DataPaths::ensureDataFolder() const {
     fs::create_directories(dataDir(), ec);
     if (ec) return {false, "Cannot create data folder: " + ec.message()};
 
-    const char* names[] = {"Product.txt", "Order.txt", "OrderDetail.txt", "Bill.txt", "PCategory.txt"};
-    const char* names[] = {"Product.txt", "Order.txt", "OrderDetail.txt", "Bill.txt", "BillDetail.txt"};
+    const char* names[] = {
+        "Product.txt",
+        "Order.txt",
+        "OrderDetail.txt",
+        "Bill.txt",
+        "BillDetail.txt",
+        "PCategory.txt",
+        "Seasons.txt",
+        "Settings.txt"
+    };
     int created = 0;
     for (const char* name : names) {
         fs::path target = fs::path(dataDir()) / name;

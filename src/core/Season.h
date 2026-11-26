@@ -1,7 +1,7 @@
-// [WRITTEN BY MEMBER 4 on behalf of MEMBER 5 – minimal version so Member 4's billing work could build/test. Member 5: review, extend or replace; keep the agreed signatures.]
 #pragma once
-#include <string>
+// OWNER: Member 5. Shared contract for seasonal discounts (no Qt).
 #include <cstdint>
+#include <string>
 
 #ifndef PERCENT_TYPE_DEFINED
 #define PERCENT_TYPE_DEFINED
@@ -9,8 +9,8 @@ using Percent = std::int64_t; // hundredths of a percent: 8% = 800, 12.50% = 125
 #endif
 
 struct Season {
-    std::string startDate;
-    std::string endDate;
-    Percent percent = 0;
+    std::string startDate; // YYYY-MM-DD
+    std::string endDate;   // YYYY-MM-DD
+    Percent percent = 0;   // > 0 and <= 10000 (100.00%)
     bool active = false;
 };

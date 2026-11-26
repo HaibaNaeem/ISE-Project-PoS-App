@@ -10,6 +10,10 @@
 #include "BillStore.h"
 #include "OrderManager.h"
 #include "CheckoutService.h"
+#include "InventoryService.h"
+#include "SeasonStore.h"
+#include "SeasonService.h"
+#include "ReportRegistry.h"
 #include "ManagerAuth.h"
 #include "Role.h"
 
@@ -48,7 +52,11 @@ private:
     ProductCatalog catalog_;
     OrderStore store_;
     BillStore bills_;
+    SeasonStore seasonStore_;
+    SeasonService seasonService_;
+    ReportRegistry reportRegistry_;
     std::unique_ptr<OrderManager> orders_;
+    std::unique_ptr<InventoryService> inventory_;
     std::unique_ptr<CheckoutService> checkout_;
 
     QLabel* roleBadge_ = nullptr;

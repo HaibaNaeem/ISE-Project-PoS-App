@@ -1,5 +1,5 @@
-// [WRITTEN BY MEMBER 4 on behalf of MEMBER 5 – minimal version so Member 4's billing work could build/test. Member 5: review, extend or replace; keep the agreed signatures.]
 #pragma once
+// OWNER: Member 5. Resolves the active seasonal discount percent for a given date (no Qt).
 #include <string>
 #include <vector>
 #include "Season.h"
@@ -7,7 +7,11 @@
 class SeasonService {
 public:
     explicit SeasonService(std::vector<Season> seasons = {});
+
+    // Returns the highest active season percent where startDate <= date <= endDate, else 0.
     Percent percentFor(const std::string& date) const;
+
+    const std::vector<Season>& seasons() const { return seasons_; }
 
 private:
     std::vector<Season> seasons_;
