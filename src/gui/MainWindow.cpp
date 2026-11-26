@@ -2,7 +2,9 @@
 #include "MainWindow.h"
 #include "AccessPolicy.h"
 #include "CameraPanel.h"
+#include "CategoriesPage.h"
 #include "OrderPage.h"
+#include "ProductsPage.h"
 #include "RoleDialog.h"
 
 #include <QHBoxLayout>
@@ -43,8 +45,9 @@ MainWindow::MainWindow(const DataPaths& paths,
     // 1. Ensure data/ folder exists and copy sample files if missing
     paths_.ensureDataFolder();
 
-    // 2. Load Product Catalog
+    // 2. Load Product Catalog and Categories
     catalog_.load(paths_.productFile());
+    categories_.load(paths_.categoryFile());
 
     // 3. Load Order Store
     store_ = OrderStore(paths_.orderFile(), paths_.orderDetailFile());
@@ -148,14 +151,10 @@ void MainWindow::applyRole(Role role) {
             return orderPage_;
         }},
         {"Products", Action::ManageProducts, [this]() -> QWidget* {
-            return makePlaceholderTab(
-                "Products",
-                "Placeholder tab: waiting for Member 2's ProductsPage (src/gui/ProductsPage.*).");
+            return new ProductsPage(catalog_, categories_, paths_.productFile(), tabs_);
         }},
         {"Categories", Action::ManageCategories, [this]() -> QWidget* {
-            return makePlaceholderTab(
-                "Categories",
-                "Placeholder tab: waiting for Member 2's CategoriesPage (src/gui/CategoriesPage.*).");
+            return new CategoriesPage(categories_, paths_.categoryFile(), tabs_);
         }},
         {"Inventory", Action::ViewInventory, [this]() -> QWidget* {
             return makePlaceholderTab(
