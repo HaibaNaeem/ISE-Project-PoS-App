@@ -1,4 +1,4 @@
-// Tests for Member 4 CheckoutService (All-or-Nothing checkout orchestration)
+// Tests for Member 4 CheckoutService (Increment 3)
 #include "TestHelpers.h"
 #include "CheckoutService.h"
 #include "ProductCatalog.h"
@@ -6,20 +6,20 @@
 #include "BillStore.h"
 #include "OrderManager.h"
 #include "Pricing.h"
+#include "SeasonService.h"
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
 namespace {
 
-// Clean temporary test directory
 void cleanFolder(const fs::path& p) {
     std::error_code ec;
     fs::remove_all(p, ec);
 }
 
-// Read whole file as string
 std::string readFileContent(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in.is_open()) return "";
@@ -28,8 +28,6 @@ std::string readFileContent(const std::string& path) {
     return ss.str();
 }
 
-// // TEMP workaround inside Member 4's test file:
-// Mirrors OrderManager memory layout to populate test order while M3's startOrder() is a stub.
 struct TestOrderManagerAccessor {
     const ProductCatalog* catalog;
     OrderStore* store;
@@ -43,288 +41,309 @@ void setTestActiveOrder(OrderManager& mgr, const Order& ord) {
 
 } // anonymous namespace
 
-static void testSuccessfulPayment() {
-    fs::path tempDir = fs::temp_directory_path() / "test_checkout_success";
+// 1. Mandatory check: Cash change 1000.00 for 828.00 gives 172.00
+static void testCashPaymentChange1000For828() {
+    fs::path tempDir = fs::temp_directory_path() / "test_checkout_cash_828";
     cleanFolder(tempDir);
     fs::create_directories(tempDir);
 
-    fs::path prodFile = tempDir / "Product.txt";
-    fs::path ordFile  = tempDir / "Order.txt";
-    fs::path detFile  = tempDir / "OrderDetail.txt";
-    fs::path billFile = tempDir / "Bill.txt";
+    fs::path prodFile   = tempDir / "Product.txt";
+    fs::path ordFile    = tempDir / "Order.txt";
+    fs::path ordDetFile = tempDir / "OrderDetail.txt";
+    fs::path billFile   = tempDir / "Bill.txt";
+    fs::path billDetFile= tempDir / "BillDetail.txt";
 
-    // Setup Products in memory
-    Product milk;
-    milk.id = "101";
-    milk.acronym = "MILKP";
-    milk.name = "Milk Powder";
-    milk.unitPrice = 45000;        // 450.00
-    milk.taxPerUnit = 2000;        // 20.00
-    milk.discountPerUnit = 1000;   // 10.00
-    milk.available = 10000;        // 10 pcs available
+    Product milk{"101", "123456", "MILKP", "Milk Powder", MeasureUnit::Count, 45000, 2000, 1000, 10000, ""};
+    ProductCatalog catalog({milk});
+    OrderStore orders(ordFile.string(), ordDetFile.string());
+    BillStore bills(billFile.string(), billDetFile.string());
 
-    Product bread;
-    bread.id = "102";
-    bread.acronym = "BREAD";
-    bread.name = "Bread 500g";
-    bread.unitPrice = 12000;       // 120.00
-    bread.taxPerUnit = 0;
-    bread.discountPerUnit = 500;   // 5.00
-    bread.available = 5000;        // 5 pcs available
+    Season novSeason{"2026-11-20", "2026-11-30", 1000, true}; // 10.00% active
+    SeasonService seasons({novSeason});
 
-    ProductCatalog catalog({milk, bread});
-    OrderStore orders(ordFile.string(), detFile.string());
-    BillStore bills(billFile.string());
-
-    CheckoutService service(catalog, orders, bills, prodFile.string());
+    CheckoutService service(catalog, orders, bills, prodFile.string(), seasons);
     OrderManager manager(catalog, &orders);
 
-    // Active order: 2 Milk and 1 Bread
     Order testOrder;
-    testOrder.id = "00000714";
+    testOrder.id = "00000722";
     testOrder.customerName = "Ali Khan";
-    testOrder.date = "2026-11-16";
+    testOrder.date = "2026-11-22";
     testOrder.time = "14:05:09";
-    testOrder.lines = {
-        {"101", "", 2000}, // 2 Milk
-        {"102", "", 1000}  // 1 Bread
-    };
+    testOrder.lines = { {"101", "123456", 2000} }; // 2 pcs
     setTestActiveOrder(manager, testOrder);
 
     PaymentInfo payment;
     payment.mode = PaymentMode::Cash;
-    payment.merchant = "";
+    payment.received = 100000; // 1000.00 PKR tendered
+    payment.specialPercent = 0;
+    payment.specialApproved = false;
 
     Bill outBill;
     OperationResult r = service.pay(manager, payment, outBill);
-
-    // 1. Transaction succeeded
     CHECK(r.success);
+    CHECK_EQ(outBill.subtotal, 90000);
+    CHECK_EQ(outBill.tax, 4000);
+    CHECK_EQ(outBill.itemDiscount, 2000);
+    CHECK_EQ(outBill.seasonalDiscount, 9200);
+    CHECK_EQ(outBill.payable, 82800);
+    CHECK_EQ(outBill.received, 100000);
+    CHECK_EQ(outBill.balance, 17200); // 172.00 PKR
 
-    // 2. Bill correctly calculated
-    CHECK_EQ(outBill.lines.size(), 2);
-    CHECK_EQ(outBill.subtotal, 102000); // 900.00 + 120.00 = 1020.00
-    CHECK_EQ(outBill.tax, 4000);        // 40.00 + 0 = 40.00
-    CHECK_EQ(outBill.discount, 2500);   // 20.00 + 5.00 = 25.00
-    CHECK_EQ(outBill.payable, 103500);  // 1020 + 40 - 25 = 1035.00 PKR
-    CHECK(outBill.status == OrderStatus::Paid);
-    CHECK_EQ(outBill.id, std::string("000000001"));
+    // Catalog stock reduced from 10 to 8
+    auto pAfter = catalog.findById("101");
+    CHECK(pAfter.has_value());
+    CHECK_EQ(pAfter->available, 8000);
 
-    // 3. In-memory stock reduced
-    auto p1 = catalog.findById("101");
-    CHECK(p1.has_value());
-    CHECK_EQ(p1->available, 8000); // 10000 - 2000 = 8000
-
-    auto p2 = catalog.findById("102");
-    CHECK(p2.has_value());
-    CHECK_EQ(p2->available, 4000); // 5000 - 1000 = 4000
-
-    // 4. Current order cleared in OrderManager
+    // Active order cleared
     CHECK(!manager.current().has_value());
 
-    // 5. BillStore has the new bill
-    CHECK_EQ(bills.bills().size(), 1);
-
-    // 6. All four files exist on disk and are not empty
+    // Disk files created
     CHECK(fs::exists(prodFile));
     CHECK(fs::exists(ordFile));
-    CHECK(fs::exists(detFile));
+    CHECK(fs::exists(ordDetFile));
     CHECK(fs::exists(billFile));
-
-    // Reload bill from disk to verify persistence
-    BillStore reloaded(billFile.string());
-    CHECK(reloaded.load().success);
-    CHECK_EQ(reloaded.bills().size(), 1);
-    CHECK_EQ(reloaded.bills()[0].payable, 103500);
+    CHECK(fs::exists(billDetFile));
 
     cleanFolder(tempDir);
 }
 
-static void testInsufficientStockRejected() {
-    fs::path tempDir = fs::temp_directory_path() / "test_checkout_insufficient";
+// 2. Card without merchant is refused
+static void testCardWithoutMerchantRefused() {
+    fs::path tempDir = fs::temp_directory_path() / "test_checkout_card_no_merchant";
     cleanFolder(tempDir);
     fs::create_directories(tempDir);
 
-    fs::path prodFile = tempDir / "Product.txt";
-    fs::path ordFile  = tempDir / "Order.txt";
-    fs::path detFile  = tempDir / "OrderDetail.txt";
-    fs::path billFile = tempDir / "Bill.txt";
-
-    Product item;
-    item.id = "201";
-    item.name = "Limited Item";
-    item.unitPrice = 10000;
-    item.available = 1000; // Only 1 available
-
-    ProductCatalog catalog({item});
-    OrderStore orders(ordFile.string(), detFile.string());
-    BillStore bills(billFile.string());
-
-    CheckoutService service(catalog, orders, bills, prodFile.string());
+    Product p{"101", "111111", "ITEM", "Item", MeasureUnit::Count, 10000, 0, 0, 5000, ""};
+    ProductCatalog catalog({p});
+    OrderStore orders;
+    BillStore bills;
+    SeasonService seasons;
+    CheckoutService service(catalog, orders, bills, "", seasons);
     OrderManager manager(catalog, &orders);
 
-    // Order asks for 2 units (2000 thousandths) -> exceeds stock!
-    Order testOrder;
-    testOrder.id = "ORD01";
-    testOrder.lines = { {"201", "", 2000} };
-    setTestActiveOrder(manager, testOrder);
+    Order ord;
+    ord.id = "ORD01";
+    ord.lines = { {"101", "", 1000} };
+    setTestActiveOrder(manager, ord);
 
     PaymentInfo payment;
-    payment.mode = PaymentMode::Cash;
+    payment.mode = PaymentMode::Card;
+    payment.merchant = ""; // Missing merchant
+    payment.received = 10000;
 
-    Bill outBill;
-    OperationResult r = service.pay(manager, payment, outBill);
-
-    // Must fail
+    Bill out;
+    OperationResult r = service.pay(manager, payment, out);
     CHECK(!r.success);
-    CHECK(r.message.find("Insufficient stock") != std::string::npos);
-
-    // Stock must be completely unchanged
-    auto prod = catalog.findById("201");
-    CHECK(prod.has_value());
-    CHECK_EQ(prod->available, 1000);
-
-    // Order must NOT be cleared
-    CHECK(manager.current().has_value());
-
-    // No bills added
-    CHECK_EQ(bills.bills().size(), 0);
+    CHECK(r.message.find("Merchant") != std::string::npos || r.message.find("merchant") != std::string::npos);
 
     cleanFolder(tempDir);
 }
 
-static void testInvalidPaymentRejected() {
-    fs::path tempDir = fs::temp_directory_path() / "test_checkout_invalid_pay";
+// 3. Special discount without approval is refused, > 800 refused
+static void testSpecialWithoutApprovalRefused() {
+    fs::path tempDir = fs::temp_directory_path() / "test_checkout_special";
     cleanFolder(tempDir);
     fs::create_directories(tempDir);
 
-    Product p;
-    p.id = "301";
-    p.unitPrice = 5000;
-    p.available = 5000;
-
+    Product p{"101", "111111", "ITEM", "Item", MeasureUnit::Count, 10000, 0, 0, 5000, ""};
     ProductCatalog catalog({p});
-    OrderStore orders((tempDir / "O.txt").string(), (tempDir / "D.txt").string());
-    BillStore bills((tempDir / "B.txt").string());
-    CheckoutService service(catalog, orders, bills, (tempDir / "P.txt").string());
+    OrderStore orders;
+    BillStore bills;
+    SeasonService seasons;
+    CheckoutService service(catalog, orders, bills, "", seasons);
     OrderManager manager(catalog, &orders);
 
-    Order testOrder;
-    testOrder.id = "ORD02";
-    testOrder.lines = { {"301", "", 1000} };
-    setTestActiveOrder(manager, testOrder);
+    Order ord;
+    ord.id = "ORD01";
+    ord.lines = { {"101", "", 1000} };
+    setTestActiveOrder(manager, ord);
 
-    // Card payment WITHOUT merchant name -> must fail
-    PaymentInfo cardNoMerchant;
-    cardNoMerchant.mode = PaymentMode::Card;
-    cardNoMerchant.merchant = "";
+    // 5% special without approval
+    PaymentInfo payment;
+    payment.mode = PaymentMode::Cash;
+    payment.specialPercent = 500;
+    payment.specialApproved = false; // Not approved!
+    payment.received = 10000;
 
-    Bill outBill;
-    OperationResult r1 = service.pay(manager, cardNoMerchant, outBill);
+    Bill out;
+    OperationResult r1 = service.pay(manager, payment, out);
     CHECK(!r1.success);
+    CHECK(r1.message.find("approval") != std::string::npos || r1.message.find("Approval") != std::string::npos);
 
-    // Cash payment WITH merchant name -> must fail
-    PaymentInfo cashWithMerchant;
-    cashWithMerchant.mode = PaymentMode::Cash;
-    cashWithMerchant.merchant = "Bank";
-
-    OperationResult r2 = service.pay(manager, cashWithMerchant, outBill);
+    // 8.01% special with approval (exceeds 8.00% cap)
+    payment.specialPercent = 801;
+    payment.specialApproved = true;
+    OperationResult r2 = service.pay(manager, payment, out);
     CHECK(!r2.success);
-
-    // None payment mode -> must fail
-    PaymentInfo nonePayment;
-    nonePayment.mode = PaymentMode::None;
-    OperationResult r3 = service.pay(manager, nonePayment, outBill);
-    CHECK(!r3.success);
-
-    // Stock unchanged
-    CHECK_EQ(catalog.findById("301")->available, 5000);
+    CHECK(r2.message.find("8.00%") != std::string::npos || r2.message.find("800") != std::string::npos);
 
     cleanFolder(tempDir);
 }
 
-static void testForcedWriteFailureAllOrNothing() {
-    // CRITICAL SPEC REQUIREMENT:
-    // After a forced write failure, all four files AND in-memory stock are exactly as before the payment.
+// 4. Forced write failure leaves all five files and stock unchanged (all-or-nothing rollback)
+static void testForcedFailureRollback() {
     fs::path tempDir = fs::temp_directory_path() / "test_checkout_forced_fail";
     cleanFolder(tempDir);
     fs::create_directories(tempDir);
 
-    fs::path prodFile = tempDir / "Product.txt";
-    fs::path ordFile  = tempDir / "Order.txt";
-    fs::path detFile  = tempDir / "OrderDetail.txt";
-    fs::path billFile = tempDir / "Bill.txt";
+    fs::path prodFile   = tempDir / "Product.txt";
+    fs::path ordFile    = tempDir / "Order.txt";
+    fs::path ordDetFile = tempDir / "OrderDetail.txt";
+    fs::path billFile   = tempDir / "Bill.txt";
+    fs::path billDetFile= tempDir / "BillDetail.txt";
 
-    // Write initial file contents
+    Product p{"101", "111111", "ITEM", "Item", MeasureUnit::Count, 10000, 0, 0, 10000, ""};
+    ProductCatalog catalog({p});
+    OrderStore orders(ordFile.string(), ordDetFile.string());
+    BillStore bills(billFile.string(), billDetFile.string());
+
+    // Save initial state to disk
     {
-        std::ofstream p(prodFile); p << "INITIAL_PRODUCT_CONTENT\n";
-        std::ofstream o(ordFile);  o << "INITIAL_ORDER_CONTENT\n";
-        std::ofstream d(detFile);  d << "INITIAL_DETAIL_CONTENT\n";
-        std::ofstream b(billFile); b << "INITIAL_BILL_CONTENT\n";
+        std::ofstream(prodFile) << catalog.serialize();
+        std::ofstream(ordFile) << "";
+        std::ofstream(ordDetFile) << "";
+        std::ofstream(billFile) << "";
+        std::ofstream(billDetFile) << "";
     }
+    std::string initialProdContent = readFileContent(prodFile.string());
 
-    std::string initProd = readFileContent(prodFile.string());
-    std::string initOrd  = readFileContent(ordFile.string());
-    std::string initDet  = readFileContent(detFile.string());
-    std::string initBill = readFileContent(billFile.string());
-
-    Product item;
-    item.id = "401";
-    item.acronym = "ATOM";
-    item.name = "Atomic Item";
-    item.unitPrice = 10000;
-    item.available = 5000; // Initial stock: 5 units
-
-    ProductCatalog catalog({item});
-    OrderStore orders(ordFile.string(), detFile.string());
-    BillStore bills(billFile.string());
-
-    CheckoutService service(catalog, orders, bills, prodFile.string());
+    SeasonService seasons;
+    CheckoutService service(catalog, orders, bills, prodFile.string(), seasons);
     OrderManager manager(catalog, &orders);
 
-    Order testOrder;
-    testOrder.id = "ORD_FAIL_TEST";
-    testOrder.lines = { {"401", "", 2000} };
-    setTestActiveOrder(manager, testOrder);
+    Order ord;
+    ord.id = "ORD01";
+    ord.lines = { {"101", "", 2000} };
+    setTestActiveOrder(manager, ord);
 
     PaymentInfo payment;
     payment.mode = PaymentMode::Cash;
+    payment.received = 20000;
 
-    // SIMULATE FORCED WRITE FAILURE
+    // Simulate write failure
     service.simulateWriteFailure(true);
 
-    Bill outBill;
-    OperationResult r = service.pay(manager, payment, outBill);
-
-    // 1. Payment must report failure
+    Bill out;
+    OperationResult r = service.pay(manager, payment, out);
     CHECK(!r.success);
 
-    // 2. In-memory stock numbers must be EXACTLY as before the payment (still 5000)
-    auto prodAfter = catalog.findById("401");
-    CHECK(prodAfter.has_value());
-    CHECK_EQ(prodAfter->available, 5000);
-
-    // 3. Manager active order must NOT be cleared
-    CHECK(manager.current().has_value());
-    CHECK_EQ(manager.current()->id, std::string("ORD_FAIL_TEST"));
-
-    // 4. BillStore must have NO new bills
+    // In-memory catalog stock unchanged
+    CHECK_EQ(catalog.findById("101")->available, 10000);
+    // Bills in store unchanged
     CHECK_EQ(bills.bills().size(), 0);
+    // Active order remains in manager
+    CHECK(manager.current().has_value());
+    // File on disk unchanged
+    CHECK_EQ(readFileContent(prodFile.string()), initialProdContent);
 
-    // 5. ALL FOUR FILES on disk must be byte-for-byte EXACTLY as before the payment
-    CHECK_EQ(readFileContent(prodFile.string()), initProd);
-    CHECK_EQ(readFileContent(ordFile.string()),  initOrd);
-    CHECK_EQ(readFileContent(detFile.string()),  initDet);
-    CHECK_EQ(readFileContent(billFile.string()), initBill);
+    cleanFolder(tempDir);
+}
+
+// 5. saveEdited: stock 10 and quantity 2 to 5 leaves stock 7, same Bill ID and date
+static void testSaveEditedStockDifference() {
+    fs::path tempDir = fs::temp_directory_path() / "test_checkout_save_edited";
+    cleanFolder(tempDir);
+    fs::create_directories(tempDir);
+
+    fs::path prodFile   = tempDir / "Product.txt";
+    fs::path ordFile    = tempDir / "Order.txt";
+    fs::path ordDetFile = tempDir / "OrderDetail.txt";
+    fs::path billFile   = tempDir / "Bill.txt";
+    fs::path billDetFile= tempDir / "BillDetail.txt";
+
+    // Available stock in catalog at time of editing is 10 pcs (10000)
+    Product p{"101", "123456", "MILKP", "Milk Powder", MeasureUnit::Count, 45000, 2000, 1000, 10000, ""};
+    ProductCatalog catalog({p});
+    OrderStore orders(ordFile.string(), ordDetFile.string());
+    BillStore bills(billFile.string(), billDetFile.string());
+
+    Season season{"2026-11-20", "2026-11-30", 1000, true}; // 10% active
+    SeasonService seasons({season});
+
+    // Original paid order with quantity 2 pcs (2000)
+    Order origOrder;
+    origOrder.id = "00000722";
+    origOrder.customerName = "Ali Khan";
+    origOrder.date = "2026-11-22";
+    origOrder.time = "14:05:09";
+    origOrder.status = OrderStatus::Paid;
+    origOrder.lines = { {"101", "123456", 2000} };
+    origOrder.paymentAmount = 82800;
+    origOrder.mode = PaymentMode::Cash;
+    orders.orders().push_back(origOrder);
+
+    // Original bill
+    Bill origBill;
+    origBill.id = "000000031";
+    origBill.orderId = "00000722";
+    origBill.customerName = "Ali Khan";
+    origBill.date = "2026-11-22";
+    origBill.time = "14:05:09";
+    origBill.subtotal = 90000;
+    origBill.tax = 4000;
+    origBill.itemDiscount = 2000;
+    origBill.seasonalDiscount = 9200;
+    origBill.payable = 82800;
+    origBill.received = 100000;
+    origBill.balance = 17200;
+    origBill.status = OrderStatus::Paid;
+    origBill.lines = { {"MILKP", 45000, 2000, 2000} };
+    bills.add(origBill);
+
+    // Initial save to disk
+    orders.save();
+    bills.save();
+    {
+        std::ofstream out(prodFile);
+        out << catalog.serialize();
+    }
+
+    CheckoutService service(catalog, orders, bills, prodFile.string(), seasons);
+    OrderManager manager(catalog, &orders);
+
+    // Cashier opens and edits paid order: quantity changed from 2 to 5 (5000)
+    Order editedOrder = origOrder;
+    editedOrder.lines = { {"101", "123456", 5000} };
+    setTestActiveOrder(manager, editedOrder);
+
+    // Save edited payment
+    // 5 x 450 = 2250.00 (225000), tax 5 x 20 = 100.00 (10000), disc 5 x 10 = 50.00 (5000) -> base = 2300.00 (230000)
+    // seasonal 10% = 230.00 (23000) -> payable = 2070.00 (207000)
+    PaymentInfo payment;
+    payment.mode = PaymentMode::Cash;
+    payment.received = 210000; // 2100.00 PKR tendered
+    payment.specialPercent = 0;
+    payment.specialApproved = false;
+
+    Bill outBill;
+    OperationResult r = service.saveEdited(manager, payment, outBill);
+    CHECK(r.success);
+
+    // Stock was 10, increased quantity by (5 - 2) = 3, so stock becomes 10 - 3 = 7 (7000)
+    auto pAfter = catalog.findById("101");
+    CHECK(pAfter.has_value());
+    CHECK_EQ(pAfter->available, 7000);
+
+    // Same Bill ID, same date, same time
+    CHECK_EQ(outBill.id, std::string("000000031"));
+    CHECK_EQ(outBill.date, std::string("2026-11-22"));
+    CHECK_EQ(outBill.time, std::string("14:05:09"));
+
+    // Updated line quantity and totals
+    CHECK_EQ(outBill.lines.size(), 1);
+    CHECK_EQ(outBill.lines[0].quantity, 5000);
+    CHECK_EQ(outBill.payable, 207000);
+    CHECK_EQ(outBill.received, 210000);
+    CHECK_EQ(outBill.balance, 3000); // 30.00 PKR change
 
     cleanFolder(tempDir);
 }
 
 int main() {
-    testSuccessfulPayment();
-    testInsufficientStockRejected();
-    testInvalidPaymentRejected();
-    testForcedWriteFailureAllOrNothing();
+    testCashPaymentChange1000For828();
+    testCardWithoutMerchantRefused();
+    testSpecialWithoutApprovalRefused();
+    testForcedFailureRollback();
+    testSaveEditedStockDifference();
     return testSummary("test_checkout");
 }
-

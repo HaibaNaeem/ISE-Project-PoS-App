@@ -1,5 +1,5 @@
 // OWNER: Member 4.
-// Atomic payment orchestration implementation.
+// Atomic payment orchestration implementation for Increment 3.
 #include "CheckoutService.h"
 #include "Pricing.h"
 #include "StockRules.h"
@@ -7,119 +7,33 @@
 #include "Units.h"
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <set>
+#include <ctime>
 
 namespace fs = std::filesystem;
 
 namespace {
 
-// Format money string helper
-std::string moneyToStr(Money amount) {
-    std::string s = formatMoney(amount);
-    if (s != "TODO") return s;
-    std::string sign = amount < 0 ? "-" : "";
-    if (amount < 0) amount = -amount;
-    std::string cents = std::to_string(amount % 100);
-    if (cents.size() < 2) cents = "0" + cents;
-    return sign + std::to_string(amount / 100) + "." + cents;
+// Private date/time helpers until Member 2 merges DateText
+namespace BillingDates {
+inline std::string todayText() {
+    auto t = std::time(nullptr);
+    auto tm = *std::localtime(&t);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
+    return std::string(buf);
+}
+inline std::string nowTimeText() {
+    auto t = std::time(nullptr);
+    auto tm = *std::localtime(&t);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
+    return std::string(buf);
+}
 }
 
-// Format quantity string helper
-std::string qtyToStr(Quantity qty) {
-    if (qty % 1000 == 0) return std::to_string(qty / 1000);
-    std::string q = std::to_string(qty % 1000);
-    while (q.size() < 3) q = "0" + q;
-    return std::to_string(qty / 1000) + "." + q;
-}
-
-// Fallback serializer for ProductCatalog if M2 serialize() on dev is still returning ""
-std::string serializeProductCatalogFallback(const ProductCatalog& cat) {
-    std::string out = cat.serialize();
-    if (!out.empty()) {
-        return out;
-    }
-    std::string text;
-    for (const auto& p : cat.all()) {
-        std::string unitStr = (p.unit == MeasureUnit::Weight) ? "weight" : "count";
-        std::vector<std::string> fields = {
-            p.id,
-            p.barcode,
-            p.acronym,
-            quoteField(p.name),
-            unitStr,
-            moneyToStr(p.unitPrice),
-            moneyToStr(p.taxPerUnit),
-            moneyToStr(p.discountPerUnit),
-            qtyToStr(p.available),
-            quoteField(p.barcodeImagePath)
-        };
-        std::string rec;
-        for (size_t i = 0; i < fields.size(); ++i) {
-            if (i > 0) rec += " ";
-            rec += fields[i];
-        }
-        rec += " #\n";
-        text += rec;
-    }
-    return text;
-}
-
-// Fallback serializer for OrderStore Orders if M3 serializeOrders() on dev is still returning ""
-std::string serializeOrdersFallback(const OrderStore& store) {
-    std::string out = store.serializeOrders();
-    if (!out.empty()) {
-        return out;
-    }
-    std::string text;
-    for (const auto& ord : store.orders()) {
-        std::vector<std::string> fields = {
-            ord.id,
-            ord.date.empty() ? "2026-11-16" : ord.date,
-            ord.time.empty() ? "00:00:00" : ord.time,
-            quoteField(ord.customerName),
-            quoteField(ord.customerContact),
-            orderStatusToText(ord.status),
-            moneyToStr(ord.paymentAmount),
-            paymentModeToText(ord.mode),
-            quoteField(ord.merchant)
-        };
-        std::string rec;
-        for (size_t i = 0; i < fields.size(); ++i) {
-            if (i > 0) rec += " ";
-            rec += fields[i];
-        }
-        rec += " #\n";
-        text += rec;
-    }
-    return text;
-}
-
-// Fallback serializer for OrderStore Details if M3 serializeDetails() on dev is still returning ""
-std::string serializeDetailsFallback(const OrderStore& store) {
-    std::string out = store.serializeDetails();
-    if (!out.empty()) {
-        return out;
-    }
-    std::string text;
-    for (const auto& ord : store.orders()) {
-        for (const auto& line : ord.lines) {
-            std::vector<std::string> fields = {
-                ord.id,
-                line.productId,
-                qtyToStr(line.quantity)
-            };
-            std::string rec;
-            for (size_t i = 0; i < fields.size(); ++i) {
-                if (i > 0) rec += " ";
-                rec += fields[i];
-            }
-            rec += " #\n";
-            text += rec;
-        }
-    }
-    return text;
-}
-
-// Executes an atomic commit of all 4 files with full rollback capability
+// Executes an atomic commit of all 5 files with full rollback capability
 OperationResult commitAllOrNothing(
     const std::vector<std::pair<std::string, std::string>>& fileEntries,
     bool simulateFailure)
@@ -219,12 +133,25 @@ CheckoutService::CheckoutService(
     ProductCatalog& catalog,
     OrderStore& orders,
     BillStore& bills,
+    std::string productPath,
+    const SeasonService& seasons)
+    : catalog_(&catalog), orders_(&orders), bills_(&bills),
+      productPath_(std::move(productPath)), seasons_(&seasons) {}
+
+CheckoutService::CheckoutService(
+    ProductCatalog& catalog,
+    OrderStore& orders,
+    BillStore& bills,
     std::string productPath)
-    : catalog_(&catalog), orders_(&orders), bills_(&bills), productPath_(std::move(productPath)) {}
+    : catalog_(&catalog), orders_(&orders), bills_(&bills),
+      productPath_(std::move(productPath)) {
+    defaultSeasons_ = std::make_unique<SeasonService>();
+    seasons_ = defaultSeasons_.get();
+}
 
 OperationResult CheckoutService::pay(OrderManager& manager, const PaymentInfo& payment, Bill& out) {
     // -------------------------------------------------------------
-    // Step 1: Validate active order and payment details
+    // Step 1: Validate active order
     // -------------------------------------------------------------
     if (!manager.current().has_value()) {
         return {false, "No active order to checkout."};
@@ -239,58 +166,96 @@ OperationResult CheckoutService::pay(OrderManager& manager, const PaymentInfo& p
         return {false, "Please select a valid payment mode (Cash, Card, or Wallet)."};
     }
 
-    if (payment.mode == PaymentMode::Card || payment.mode == PaymentMode::Wallet) {
-        if (payment.merchant.empty()) {
-            return {false, "Merchant name is required for Card and Wallet payments."};
-        }
-    } else if (payment.mode == PaymentMode::Cash) {
-        if (!payment.merchant.empty()) {
-            return {false, "Merchant name must be empty for Cash payments."};
-        }
+    // -------------------------------------------------------------
+    // Step 2: Validate special discount parameters
+    // -------------------------------------------------------------
+    if (payment.specialPercent < 0) {
+        return {false, "Special discount percentage cannot be negative."};
+    }
+    if (payment.specialPercent > 800) {
+        return {false, "Special discount percentage cannot exceed 8.00% (max 800). Special above 8.00% is refused."};
+    }
+    if (payment.specialPercent > 0 && !payment.specialApproved) {
+        return {false, "Special discount requires manager approval."};
     }
 
     // -------------------------------------------------------------
-    // Step 2: Check stock AGAIN for every order line using StockRules
+    // Step 3: Re-check stock for every product using StockRules
     // -------------------------------------------------------------
+    std::map<std::string, Quantity> orderQuantities;
     for (const auto& line : currentOrder.lines) {
-        std::optional<Product> prod = catalog_->findById(line.productId);
-        if (!prod && !line.barcode.empty()) {
-            prod = catalog_->findByBarcode(line.barcode);
-        }
+        orderQuantities[line.productId] += line.quantity;
+    }
 
+    for (const auto& [pid, requestedQty] : orderQuantities) {
+        std::optional<Product> prod = catalog_->findById(pid);
         if (!prod) {
-            return {false, "Product not found in catalog: " + line.productId};
+            return {false, "Product not found in catalog: " + pid};
         }
-
-        // Verify sufficient stock remains (cannot sell more than available)
-        if (!hasEnoughStock(0, line.quantity, prod->available)) {
+        if (!hasEnoughStock(0, requestedQty, prod->available)) {
             return {false, "Insufficient stock for product '" + prod->name + "'."};
         }
     }
 
     // -------------------------------------------------------------
-    // Step 3: Build the final bill draft
+    // Step 4: Look up seasonal discount for today
+    // -------------------------------------------------------------
+    std::string dateStr = currentOrder.date.empty() ? BillingDates::todayText() : currentOrder.date;
+    std::string timeStr = currentOrder.time.empty() ? BillingDates::nowTimeText() : currentOrder.time;
+    Percent seasonalPercent = seasons_->percentFor(dateStr);
+
+    // -------------------------------------------------------------
+    // Step 5: Build final Bill
     // -------------------------------------------------------------
     std::string nextId = bills_->nextBillId();
-    Bill finalBill = buildBill(currentOrder, *catalog_, nextId);
+    BillOptions options;
+    options.billId = nextId;
+    options.date = dateStr;
+    options.time = timeStr;
+    options.seasonalPercent = seasonalPercent;
+    options.specialPercent = payment.specialPercent;
+    options.received = payment.received;
+
+    Bill finalBill = buildBill(currentOrder, *catalog_, options);
     if (finalBill.lines.empty()) {
         return {false, "Failed to price order lines."};
     }
 
-    // Validate payment amount equals bill total
-    if (currentOrder.paymentAmount != 0 && currentOrder.paymentAmount != finalBill.payable) {
-        return {false, "Payment amount does not equal the bill total."};
+    // -------------------------------------------------------------
+    // Step 6: Validate payment details against payable amount
+    // -------------------------------------------------------------
+    if (payment.mode == PaymentMode::Cash) {
+        Money received = payment.received;
+        if (received == 0) {
+            received = finalBill.payable;
+        } else if (received < finalBill.payable) {
+            return {false, "Insufficient cash received. Received: " + formatMoney(received) +
+                           " PKR, Payable: " + formatMoney(finalBill.payable) + " PKR."};
+        }
+        finalBill.received = received;
+        finalBill.balance = received - finalBill.payable;
+    } else {
+        // Card or Wallet
+        if (payment.merchant.empty()) {
+            return {false, "Merchant name is required for Card and Wallet payments."};
+        }
+        finalBill.received = finalBill.payable;
+        finalBill.balance = 0;
     }
 
+    finalBill.status = OrderStatus::Paid;
+    finalBill.paymentMode = payment.mode;
+    finalBill.merchant = payment.merchant;
+
     // -------------------------------------------------------------
-    // Step 4: Work on COPIES ONLY (All-or-Nothing preparation)
+    // Step 7: Work on COPIES ONLY (All-or-Nothing preparation)
     // -------------------------------------------------------------
     // Copy of Catalog with stock reduced
     ProductCatalog catalogCopy = *catalog_;
-    for (const auto& line : currentOrder.lines) {
-        OperationResult reduceRes = catalogCopy.reduceStock(line.productId, line.quantity);
+    for (const auto& [pid, qty] : orderQuantities) {
+        OperationResult reduceRes = catalogCopy.reduceStock(pid, qty);
         if (!reduceRes.success) {
-            return {false, "Failed to deduct stock for product ID " + line.productId};
+            return {false, "Failed to deduct stock for product ID " + pid};
         }
     }
 
@@ -300,19 +265,9 @@ OperationResult CheckoutService::pay(OrderManager& manager, const PaymentInfo& p
     paidOrder.mode = payment.mode;
     paidOrder.merchant = payment.merchant;
     paidOrder.paymentAmount = finalBill.payable;
+    paidOrder.date = dateStr;
+    paidOrder.time = timeStr;
 
-    // Finalize bill metadata
-    finalBill.status = OrderStatus::Paid;
-    finalBill.paymentMode = payment.mode;
-    finalBill.merchant = payment.merchant;
-    finalBill.date = paidOrder.date;
-    finalBill.time = paidOrder.time;
-
-    // Copy of BillStore with new bill added
-    BillStore billsCopy = *bills_;
-    billsCopy.addBill(finalBill);
-
-    // Copy of OrderStore with paid order updated
     OrderStore ordersCopy = *orders_;
     bool orderUpdated = false;
     for (auto& ord : ordersCopy.orders()) {
@@ -326,13 +281,21 @@ OperationResult CheckoutService::pay(OrderManager& manager, const PaymentInfo& p
         ordersCopy.orders().push_back(paidOrder);
     }
 
+    // Copy of BillStore with new bill added
+    BillStore billsCopy = *bills_;
+    OperationResult addRes = billsCopy.add(finalBill);
+    if (!addRes.success) {
+        return {false, "Failed to add bill: " + addRes.message};
+    }
+
     // -------------------------------------------------------------
-    // Step 5: Write all four files atomically via FileTransaction
+    // Step 8: Write all five files atomically via FileTransaction
     // -------------------------------------------------------------
-    std::string productContent = serializeProductCatalogFallback(catalogCopy);
-    std::string orderContent   = serializeOrdersFallback(ordersCopy);
-    std::string detailContent  = serializeDetailsFallback(ordersCopy);
-    std::string billContent    = billsCopy.serialize();
+    std::string productContent    = catalogCopy.serialize();
+    std::string orderContent      = ordersCopy.serializeOrders();
+    std::string detailContent     = ordersCopy.serializeDetails();
+    std::string billContent       = billsCopy.serializeBills();
+    std::string billDetailContent = billsCopy.serializeDetails();
 
     std::vector<std::pair<std::string, std::string>> filesToCommit;
     if (!productPath_.empty()) {
@@ -344,8 +307,11 @@ OperationResult CheckoutService::pay(OrderManager& manager, const PaymentInfo& p
     if (!orders_->detailPath().empty()) {
         filesToCommit.push_back({orders_->detailPath(), detailContent});
     }
-    if (!bills_->path().empty()) {
-        filesToCommit.push_back({bills_->path(), billContent});
+    if (!bills_->billPath().empty()) {
+        filesToCommit.push_back({bills_->billPath(), billContent});
+    }
+    if (!bills_->detailPath().empty()) {
+        filesToCommit.push_back({bills_->detailPath(), billDetailContent});
     }
 
     OperationResult commitRes = commitAllOrNothing(filesToCommit, simulateFailure_);
@@ -355,7 +321,7 @@ OperationResult CheckoutService::pay(OrderManager& manager, const PaymentInfo& p
     }
 
     // -------------------------------------------------------------
-    // Step 6: ONLY after transaction succeeds, update in-memory state
+    // Step 9: ONLY after transaction succeeds, update in-memory state
     // -------------------------------------------------------------
     *catalog_ = std::move(catalogCopy);
     *orders_  = std::move(ordersCopy);
@@ -368,4 +334,215 @@ OperationResult CheckoutService::pay(OrderManager& manager, const PaymentInfo& p
     out = finalBill;
 
     return {true, "Payment successful.", finalBill.id};
+}
+
+OperationResult CheckoutService::saveEdited(OrderManager& manager, const PaymentInfo& payment, Bill& out) {
+    // -------------------------------------------------------------
+    // Step 1: Validate active edited order
+    // -------------------------------------------------------------
+    if (!manager.current().has_value()) {
+        return {false, "No active order to save."};
+    }
+
+    const Order& currentOrder = *manager.current();
+    if (currentOrder.lines.empty()) {
+        return {false, "Cannot save an empty order."};
+    }
+
+    // Find the original saved order in OrderStore
+    const Order* origOrder = nullptr;
+    for (const auto& ord : orders_->orders()) {
+        if (ord.id == currentOrder.id) {
+            origOrder = &ord;
+            break;
+        }
+    }
+    if (!origOrder) {
+        return {false, "Original order not found in store for order ID: " + currentOrder.id};
+    }
+
+    // Find the original bill in BillStore
+    std::optional<Bill> origBill = bills_->findByOrderId(currentOrder.id);
+    if (!origBill) {
+        origBill = bills_->findById(currentOrder.id);
+    }
+    if (!origBill) {
+        return {false, "Original bill not found for order ID: " + currentOrder.id};
+    }
+
+    // -------------------------------------------------------------
+    // Step 2: Validate special discount parameters
+    // -------------------------------------------------------------
+    if (payment.specialPercent < 0) {
+        return {false, "Special discount percentage cannot be negative."};
+    }
+    if (payment.specialPercent > 800) {
+        return {false, "Special discount percentage cannot exceed 8.00% (max 800). Special above 8.00% is refused."};
+    }
+    if (payment.specialPercent > 0 && !payment.specialApproved) {
+        return {false, "Special discount requires manager approval."};
+    }
+
+    // -------------------------------------------------------------
+    // Step 3: Stock check by DIFFERENCE per product:
+    // available + quantity that line had before
+    // -------------------------------------------------------------
+    std::map<std::string, Quantity> oldQuantities;
+    for (const auto& line : origOrder->lines) {
+        oldQuantities[line.productId] += line.quantity;
+    }
+
+    std::map<std::string, Quantity> newQuantities;
+    for (const auto& line : currentOrder.lines) {
+        newQuantities[line.productId] += line.quantity;
+    }
+
+    std::set<std::string> allProductIds;
+    for (const auto& [pid, _] : oldQuantities) allProductIds.insert(pid);
+    for (const auto& [pid, _] : newQuantities) allProductIds.insert(pid);
+
+    for (const auto& pid : allProductIds) {
+        Quantity oldQty = oldQuantities.count(pid) ? oldQuantities[pid] : 0;
+        Quantity newQty = newQuantities.count(pid) ? newQuantities[pid] : 0;
+        Quantity diff = newQty - oldQty;
+
+        auto prod = catalog_->findById(pid);
+        if (!prod) {
+            return {false, "Product not found in catalog: " + pid};
+        }
+
+        // Check if available stock can cover any positive difference
+        if (diff > 0 && prod->available < diff) {
+            return {false, "Insufficient stock for product '" + prod->name + "'."};
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Step 4: Look up seasonal discount for the ORIGINAL bill date
+    // -------------------------------------------------------------
+    Percent seasonalPercent = seasons_->percentFor(origBill->date);
+
+    // -------------------------------------------------------------
+    // Step 5: Build rewritten Bill preserving ID, date and time
+    // -------------------------------------------------------------
+    BillOptions options;
+    options.billId = origBill->id;
+    options.date = origBill->date;
+    options.time = origBill->time;
+    options.seasonalPercent = seasonalPercent;
+    options.specialPercent = payment.specialPercent;
+    options.received = payment.received;
+
+    Bill editedBill = buildBill(currentOrder, *catalog_, options);
+    if (editedBill.lines.empty()) {
+        return {false, "Failed to price edited order lines."};
+    }
+
+    // Validate payment details
+    if (payment.mode == PaymentMode::Cash) {
+        Money received = payment.received;
+        if (received == 0) {
+            received = editedBill.payable;
+        } else if (received < editedBill.payable) {
+            return {false, "Insufficient cash received. Received: " + formatMoney(received) +
+                           " PKR, Payable: " + formatMoney(editedBill.payable) + " PKR."};
+        }
+        editedBill.received = received;
+        editedBill.balance = received - editedBill.payable;
+    } else {
+        if (payment.merchant.empty()) {
+            return {false, "Merchant name is required for Card and Wallet payments."};
+        }
+        editedBill.received = editedBill.payable;
+        editedBill.balance = 0;
+    }
+
+    editedBill.status = OrderStatus::Paid;
+    editedBill.paymentMode = payment.mode;
+    editedBill.merchant = payment.merchant;
+
+    // -------------------------------------------------------------
+    // Step 6: Work on COPIES ONLY (All-or-Nothing preparation)
+    // -------------------------------------------------------------
+    // Adjust catalog stock by difference
+    std::vector<Product> prods = catalog_->all();
+    for (auto& p : prods) {
+        Quantity oldQty = oldQuantities.count(p.id) ? oldQuantities[p.id] : 0;
+        Quantity newQty = newQuantities.count(p.id) ? newQuantities[p.id] : 0;
+        Quantity diff = newQty - oldQty;
+        p.available -= diff;
+    }
+    ProductCatalog catalogCopy(std::move(prods));
+
+    // Update order in OrderStore copy
+    Order updatedOrder = currentOrder;
+    updatedOrder.status = OrderStatus::Paid;
+    updatedOrder.mode = payment.mode;
+    updatedOrder.merchant = payment.merchant;
+    updatedOrder.paymentAmount = editedBill.payable;
+    updatedOrder.date = origOrder->date;
+    updatedOrder.time = origOrder->time;
+
+    OrderStore ordersCopy = *orders_;
+    bool orderUpdated = false;
+    for (auto& ord : ordersCopy.orders()) {
+        if (ord.id == updatedOrder.id) {
+            ord = updatedOrder;
+            orderUpdated = true;
+            break;
+        }
+    }
+    if (!orderUpdated) {
+        ordersCopy.orders().push_back(updatedOrder);
+    }
+
+    // Replace bill in BillStore copy
+    BillStore billsCopy = *bills_;
+    OperationResult repRes = billsCopy.replace(editedBill);
+    if (!repRes.success) {
+        return {false, "Failed to replace bill: " + repRes.message};
+    }
+
+    // -------------------------------------------------------------
+    // Step 7: Write all five files atomically via FileTransaction
+    // -------------------------------------------------------------
+    std::string productContent    = catalogCopy.serialize();
+    std::string orderContent      = ordersCopy.serializeOrders();
+    std::string detailContent     = ordersCopy.serializeDetails();
+    std::string billContent       = billsCopy.serializeBills();
+    std::string billDetailContent = billsCopy.serializeDetails();
+
+    std::vector<std::pair<std::string, std::string>> filesToCommit;
+    if (!productPath_.empty()) {
+        filesToCommit.push_back({productPath_, productContent});
+    }
+    if (!orders_->orderPath().empty()) {
+        filesToCommit.push_back({orders_->orderPath(), orderContent});
+    }
+    if (!orders_->detailPath().empty()) {
+        filesToCommit.push_back({orders_->detailPath(), detailContent});
+    }
+    if (!bills_->billPath().empty()) {
+        filesToCommit.push_back({bills_->billPath(), billContent});
+    }
+    if (!bills_->detailPath().empty()) {
+        filesToCommit.push_back({bills_->detailPath(), billDetailContent});
+    }
+
+    OperationResult commitRes = commitAllOrNothing(filesToCommit, simulateFailure_);
+    if (!commitRes.success) {
+        return {false, "Saving edited order failed: " + commitRes.message};
+    }
+
+    // -------------------------------------------------------------
+    // Step 8: ONLY upon success, update in-memory state
+    // -------------------------------------------------------------
+    *catalog_ = std::move(catalogCopy);
+    *orders_  = std::move(ordersCopy);
+    *bills_   = std::move(billsCopy);
+
+    manager.clearCurrent();
+    out = editedBill;
+
+    return {true, "Edited order saved successfully.", editedBill.id};
 }
