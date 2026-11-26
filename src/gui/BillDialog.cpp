@@ -1,6 +1,7 @@
 // OWNER: Member 4.
-// Read-only Customer Bill Dialog implementation.
+// Customer Bill Dialog implementation for Increment 3.
 #include "BillDialog.h"
+#include "BillPdfWriter.h"
 #include "DialogStyle.h"
 #include "Units.h"
 #include <QVBoxLayout>
@@ -8,46 +9,35 @@
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QGroupBox>
+#include <QMessageBox>
 
 namespace {
 
-// Helper to format money for GUI table cells (right-aligned text)
 QString guiFormatMoney(Money amount) {
-    std::string s = formatMoney(amount);
-    if (s != "TODO") {
-        return QString::fromStdString(s + " PKR");
-    }
-    std::string sign = amount < 0 ? "-" : "";
-    if (amount < 0) amount = -amount;
-    std::string cents = std::to_string(amount % 100);
-    if (cents.size() < 2) cents = "0" + cents;
-    return QString::fromStdString(sign + std::to_string(amount / 100) + "." + cents + " PKR");
+    return QString::fromStdString(formatMoney(amount) + " PKR");
 }
 
-// Helper to format quantity
 QString guiFormatQuantity(Quantity qty) {
     if (qty % 1000 == 0) {
         return QString::number(qty / 1000);
     }
-    std::string q = std::to_string(qty % 1000);
-    while (q.size() < 3) q = "0" + q;
-    return QString::fromStdString(std::to_string(qty / 1000) + "." + q);
+    return QString::fromStdString(formatQuantity(qty, MeasureUnit::Weight));
 }
 
 } // anonymous namespace
 
 BillDialog::BillDialog(const Bill& bill, QWidget* parent)
-    : QDialog(parent) {
+    : QDialog(parent), bill_(bill) {
     setWindowTitle("Bill Summary - #" + QString::fromStdString(bill.id));
-    setMinimumSize(780, 540);
+    setMinimumSize(780, 560);
     setStyleSheet(DialogStyle::dialogStyleSheet());
 
-    setupUi(bill);
+    setupUi();
 }
 
-void BillDialog::setupUi(const Bill& bill) {
+void BillDialog::setupUi() {
     auto* mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(16, 16, 16, 16);
+    mainLayout->setContentsMargins(18, 18, 18, 18);
     mainLayout->setSpacing(12);
 
     // 1. Header Information Card (Bill ID, Order ID, Customer, Date/Time, Status Badge)
@@ -56,19 +46,18 @@ void BillDialog::setupUi(const Bill& bill) {
     headerLayout->setContentsMargins(12, 12, 12, 12);
     headerLayout->setSpacing(8);
 
-    auto* billIdLabel = new QLabel(QString("<b>Bill ID:</b> %1").arg(QString::fromStdString(bill.id)), headerBox);
-    auto* orderIdLabel = new QLabel(QString("<b>Order ID:</b> %1").arg(QString::fromStdString(bill.orderId)), headerBox);
-    auto* custLabel = new QLabel(QString("<b>Customer:</b> %1").arg(QString::fromStdString(bill.customerName)), headerBox);
+    auto* billIdLabel = new QLabel(QString("<b>Bill ID:</b> %1").arg(QString::fromStdString(bill_.id)), headerBox);
+    auto* orderIdLabel = new QLabel(QString("<b>Order ID:</b> %1").arg(QString::fromStdString(bill_.orderId)), headerBox);
+    auto* custLabel = new QLabel(QString("<b>Customer:</b> %1").arg(QString::fromStdString(bill_.customerName)), headerBox);
 
-    QString dateTimeStr = QString::fromStdString(bill.date + " " + bill.time).trimmed();
+    QString dateTimeStr = QString::fromStdString(bill_.date + " " + bill_.time).trimmed();
     if (dateTimeStr.isEmpty()) dateTimeStr = "N/A";
     auto* dateLabel = new QLabel(QString("<b>Date/Time:</b> %1").arg(dateTimeStr), headerBox);
 
-    // Status Badge
-    QString statusStr = QString::fromStdString(orderStatusToText(bill.status)).toUpper();
+    QString statusStr = QString::fromStdString(orderStatusToText(bill_.status)).toUpper();
     auto* statusBadge = new QLabel(statusStr, headerBox);
     statusBadge->setAlignment(Qt::AlignCenter);
-    QString badgeColor = (bill.status == OrderStatus::Paid) ? DialogStyle::kSuccess : DialogStyle::kMutedText;
+    QString badgeColor = (bill_.status == OrderStatus::Paid) ? DialogStyle::kSuccess : DialogStyle::kMutedText;
     statusBadge->setStyleSheet(QString(
         "background-color: %1; color: #FFFFFF; font-weight: bold; border-radius: 4px; padding: 4px 12px;"
     ).arg(badgeColor));
@@ -81,119 +70,115 @@ void BillDialog::setupUi(const Bill& bill) {
 
     mainLayout->addWidget(headerBox);
 
-    // 2. Product Table (One row per product on the order)
+    // 2. Product Table (One row per product on the order, showing acronyms as per spec)
     auto* table = new QTableWidget(this);
-    table->setColumnCount(8);
+    table->setColumnCount(4);
     table->setHorizontalHeaderLabels({
-        "Product", "Unit Price", "Disc / Unit", "Qty",
-        "Subtotal", "Tax", "Discount", "Total Payable"
+        "Product Acronym", "Unit Price (PKR)", "Quantity", "Discount (PKR)"
     });
 
-    table->setRowCount(static_cast<int>(bill.lines.size()));
+    table->setRowCount(static_cast<int>(bill_.lines.size()));
     table->setAlternatingRowColors(true);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->verticalHeader()->setVisible(false);
 
-    for (int i = 0; i < static_cast<int>(bill.lines.size()); ++i) {
-        const auto& line = bill.lines[i];
+    for (int i = 0; i < static_cast<int>(bill_.lines.size()); ++i) {
+        const auto& line = bill_.lines[i];
 
         auto* itemAcronym = new QTableWidgetItem(QString::fromStdString(line.acronym));
         auto* itemPrice = new QTableWidgetItem(guiFormatMoney(line.unitPrice));
-        auto* itemDiscUnit = new QTableWidgetItem(guiFormatMoney(line.discountPerUnit));
         auto* itemQty = new QTableWidgetItem(guiFormatQuantity(line.quantity));
-        auto* itemSubtotal = new QTableWidgetItem(guiFormatMoney(line.lineSubtotal));
-        auto* itemTax = new QTableWidgetItem(guiFormatMoney(line.lineTax));
-        auto* itemDiscount = new QTableWidgetItem(guiFormatMoney(line.lineDiscount));
-        auto* itemPayable = new QTableWidgetItem(guiFormatMoney(line.linePayable));
+        auto* itemDisc = new QTableWidgetItem(guiFormatMoney(line.discount));
 
-        // Right-align numbers and money columns
+        itemAcronym->setFont(QFont("Segoe UI", 10, QFont::Bold));
         itemPrice->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        itemDiscUnit->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         itemQty->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        itemSubtotal->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        itemTax->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        itemDiscount->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        itemPayable->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-
-        // Highlight line payable
-        itemPayable->setFont(QFont(font().family(), font().pointSize(), QFont::Bold));
+        itemDisc->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
         table->setItem(i, 0, itemAcronym);
         table->setItem(i, 1, itemPrice);
-        table->setItem(i, 2, itemDiscUnit);
-        table->setItem(i, 3, itemQty);
-        table->setItem(i, 4, itemSubtotal);
-        table->setItem(i, 5, itemTax);
-        table->setItem(i, 6, itemDiscount);
-        table->setItem(i, 7, itemPayable);
+        table->setItem(i, 2, itemQty);
+        table->setItem(i, 3, itemDisc);
     }
 
     table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    for (int c = 1; c < 8; ++c) {
-        table->horizontalHeader()->setSectionResizeMode(c, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+
+    mainLayout->addWidget(table);
+
+    // 3. Totals Breakdown Card
+    auto* summaryBox = new QGroupBox("Payment & Discount Summary", this);
+    auto* summaryLayout = new QGridLayout(summaryBox);
+    summaryLayout->setContentsMargins(12, 10, 12, 10);
+    summaryLayout->setSpacing(6);
+
+    auto addRow = [&](int row, const QString& label, const QString& val, bool bold = false, const QString& color = "") {
+        auto* lbl = new QLabel(label, summaryBox);
+        auto* v = new QLabel(val, summaryBox);
+        v->setAlignment(Qt::AlignRight);
+        if (bold) {
+            QFont f = lbl->font(); f.setBold(true);
+            lbl->setFont(f); v->setFont(f);
+        }
+        if (!color.isEmpty()) {
+            lbl->setStyleSheet("color: " + color + ";");
+            v->setStyleSheet("color: " + color + ";");
+        }
+        summaryLayout->addWidget(lbl, row, 0);
+        summaryLayout->addWidget(v, row, 1);
+    };
+
+    int r = 0;
+    addRow(r++, "Subtotal (without tax):", guiFormatMoney(bill_.subtotal));
+    addRow(r++, "Tax:", "+ " + guiFormatMoney(bill_.tax));
+    addRow(r++, "Item Discounts:", "- " + guiFormatMoney(bill_.itemDiscount));
+
+    if (bill_.seasonalDiscount > 0) {
+        addRow(r++, "Seasonal Discount:", "- " + guiFormatMoney(bill_.seasonalDiscount), true, "#16A34A");
+    }
+    if (bill_.specialDiscount > 0) {
+        addRow(r++, "Special Discount:", "- " + guiFormatMoney(bill_.specialDiscount), true, "#2563EB");
     }
 
-    mainLayout->addWidget(table, 1);
+    addRow(r++, "Total Payable:", guiFormatMoney(bill_.payable), true, DialogStyle::kPrimary);
+    addRow(r++, "Amount Received:", guiFormatMoney(bill_.received), true);
+    addRow(r++, "Balance Returned:", guiFormatMoney(bill_.balance), true, DialogStyle::kSuccess);
 
-    // 3. Totals and Summary Card (Bottom)
-    auto* bottomLayout = new QHBoxLayout();
+    mainLayout->addWidget(summaryBox);
 
-    // Mode details (Left)
-    QString modeName = QString::fromStdString(paymentModeToText(bill.paymentMode)).toUpper();
-    QString paymentDetails = "<b>Payment Mode:</b> " + modeName;
-    if (!bill.merchant.empty()) {
-        paymentDetails += " (" + QString::fromStdString(bill.merchant) + ")";
-    }
-    auto* payModeLabel = new QLabel(paymentDetails, this);
-    bottomLayout->addWidget(payModeLabel, 0, Qt::AlignBottom);
+    // 4. PDF Status Label
+    pdfStatusLabel_ = new QLabel(this);
+    pdfStatusLabel_->setStyleSheet("color: #059669; font-weight: bold;");
+    pdfStatusLabel_->setVisible(false);
+    mainLayout->addWidget(pdfStatusLabel_);
 
-    bottomLayout->addStretch(1);
+    // 5. Actions (Print PDF, Close)
+    auto* actionLayout = new QHBoxLayout();
+    printPdfBtn_ = new QPushButton("Print PDF", this);
+    printPdfBtn_->setStyleSheet("QPushButton { background-color: #0284C7; color: white; padding: 8px 16px; font-weight: bold; border-radius: 4px; }"
+                                "QPushButton:hover { background-color: #0369A1; }");
+    connect(printPdfBtn_, &QPushButton::clicked, this, &BillDialog::onPrintPdfClicked);
 
-    // Grand totals summary grid (Right)
-    auto* totalsBox = new QGroupBox("Payment Summary", this);
-    auto* totalsGrid = new QGridLayout(totalsBox);
-    totalsGrid->setContentsMargins(12, 10, 12, 10);
-    totalsGrid->setSpacing(6);
+    closeBtn_ = new QPushButton("Close", this);
+    connect(closeBtn_, &QPushButton::clicked, this, &QDialog::accept);
 
-    totalsGrid->addWidget(new QLabel("Subtotal (excl. Tax):", totalsBox), 0, 0);
-    auto* subtotalVal = new QLabel(guiFormatMoney(bill.subtotal), totalsBox);
-    subtotalVal->setAlignment(Qt::AlignRight);
-    totalsGrid->addWidget(subtotalVal, 0, 1);
-
-    totalsGrid->addWidget(new QLabel("Total Tax:", totalsBox), 1, 0);
-    auto* taxVal = new QLabel(guiFormatMoney(bill.tax), totalsBox);
-    taxVal->setAlignment(Qt::AlignRight);
-    totalsGrid->addWidget(taxVal, 1, 1);
-
-    totalsGrid->addWidget(new QLabel("Total Discount:", totalsBox), 2, 0);
-    auto* discVal = new QLabel(guiFormatMoney(bill.discount), totalsBox);
-    discVal->setAlignment(Qt::AlignRight);
-    totalsGrid->addWidget(discVal, 2, 1);
-
-    auto* payableTitle = new QLabel("Grand Total Payable:", totalsBox);
-    payableTitle->setStyleSheet("font-size: 13pt; font-weight: bold;");
-    totalsGrid->addWidget(payableTitle, 3, 0);
-
-    auto* payableVal = new QLabel(guiFormatMoney(bill.payable), totalsBox);
-    payableVal->setAlignment(Qt::AlignRight);
-    payableVal->setStyleSheet(QString("font-size: 16pt; font-weight: bold; color: %1;")
-                             .arg(DialogStyle::kPrimary));
-    totalsGrid->addWidget(payableVal, 3, 1);
-
-    bottomLayout->addWidget(totalsBox);
-    mainLayout->addLayout(bottomLayout);
-
-    // 4. Close Button
-    auto* btnLayout = new QHBoxLayout();
-    btnLayout->addStretch(1);
-
-    auto* closeBtn = new QPushButton("Close", this);
-    closeBtn->setObjectName("closeBtn");
-    closeBtn->setDefault(true);
-    connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
-
-    btnLayout->addWidget(closeBtn);
-    mainLayout->addLayout(btnLayout);
+    actionLayout->addWidget(printPdfBtn_);
+    actionLayout->addStretch();
+    actionLayout->addWidget(closeBtn_);
+    mainLayout->addLayout(actionLayout);
 }
 
+void BillDialog::onPrintPdfClicked() {
+    OperationResult res = BillPdfWriter::writePdf(bill_);
+    if (res.success) {
+        pdfStatusLabel_->setText(QString("PDF Generated: %1").arg(QString::fromStdString(res.outputPath)));
+        pdfStatusLabel_->setVisible(true);
+        QMessageBox::information(this, "Bill PDF Generated",
+                                 QString("Bill PDF successfully written to:\n%1").arg(QString::fromStdString(res.outputPath)));
+    } else {
+        QMessageBox::warning(this, "PDF Generation Failed", QString::fromStdString(res.message));
+    }
+}
