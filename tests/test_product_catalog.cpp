@@ -6,7 +6,16 @@
 static int failed = 0;
 #define CHECK(c) do { if (!(c)) { std::cout << "FAIL line " << __LINE__ << ": " #c "\n"; ++failed; } } while (0)
 static void writeFile(const std::string& p, const std::string& s) { std::ofstream(p, std::ios::binary) << s; }
-static std::string readAll(const std::string& p) { std::ifstream f(p, std::ios::binary); return {std::istreambuf_iterator<char>(f), {}}; }
+static std::string readAll(const std::string& p) {
+    std::ifstream f(p, std::ios::binary);
+    std::string raw{std::istreambuf_iterator<char>(f), {}};
+    std::string out;
+    out.reserve(raw.size());
+    for (char ch : raw) {
+        if (ch != '\r') out.push_back(ch);
+    }
+    return out;
+}
 
 static Product make(const std::string& barcode, const std::string& acr)
 {

@@ -1,7 +1,11 @@
 // OWNER: Member 1. Order screen layout and cashier interactions.
 #include "OrderPage.h"
 #include "AccessPolicy.h"
+#include "ApprovalDialog.h"
 #include "CameraPanel.h"
+#include "DateText.h"
+#include "OpenOrderDialog.h"
+#include "OrderEditService.h"
 #include "ProductInfoDialog.h"
 #include "PaymentDialog.h"
 #include "BillDialog.h"
@@ -25,14 +29,20 @@ QString qtyText(Quantity q, MeasureUnit u) {
 
 OrderPage::OrderPage(ProductCatalog& catalog,
                      OrderManager& orders,
+                     const OrderStore& orderStore,
+                     const BillStore& billStore,
                      CheckoutService& checkout,
+                     const SeasonService& seasons,
                      Role role,
                      const ManagerAuth& auth,
                      QWidget* parent)
     : QWidget(parent),
       catalog_(catalog),
       orders_(orders),
+      orderStore_(orderStore),
+      billStore_(billStore),
       checkout_(checkout),
+      seasons_(seasons),
       role_(role),
       auth_(auth) {
     buildUi();
@@ -43,6 +53,10 @@ OrderPage::~OrderPage() = default;
 
 void OrderPage::setRole(Role role) {
     role_ = role;
+    refresh();
+}
+
+void OrderPage::refreshView() {
     refresh();
 }
 
@@ -307,43 +321,57 @@ void OrderPage::refresh() {
     const auto& cur = orders_.current();
     const bool hasLines = cur && !cur->lines.empty();
 
-    // Once M3 merges OrderManager::original(), pass orders_.original() here:
-    updateEditBanner(std::nullopt);
+    updateEditBanner(orders_.original());
 
     QSignalBlocker block(cart_);
     cart_->setRowCount(0);
 
     if (hasLines) {
-        // Totals and line totals come strictly from buildBill() (never computed in GUI).
-        // Waiting on M4 BillOptions + M5 SeasonService::percentFor(todayText()) for seasonal discount.
-        Bill draft = buildBill(*cur, catalog_, "");
+        // Totals come strictly from buildBill() (never computed in GUI).
+        std::string priceDate = todayText();
+        if (editingPaidOrder_ && orders_.original().has_value()) {
+            if (const auto origBill = billStore_.findByOrderId(orders_.original()->id)) {
+                priceDate = origBill->date;
+            } else if (!orders_.original()->date.empty()) {
+                priceDate = orders_.original()->date;
+            }
+        }
+        BillOptions draftOpts;
+        draftOpts.date = priceDate;
+        draftOpts.time = nowTimeText();
+        draftOpts.seasonalPercent = seasons_.percentFor(priceDate);
+        Bill draft = buildBill(*cur, catalog_, draftOpts);
 
         int row = 0;
-        for (const auto& billLine : draft.lines) {
-            const auto p = catalog_.findById(billLine.productId);
+        for (const auto& orderLine : cur->lines) {
+            std::optional<Product> p = catalog_.findById(orderLine.productId);
+            if (!p && !orderLine.barcode.empty()) {
+                p = catalog_.findByBarcode(orderLine.barcode);
+            }
             if (!p) continue;
+            const Money lineSubtotal = multiplyPriceByQuantity(p->unitPrice, orderLine.quantity);
             cart_->insertRow(row);
             const QStringList cells = {
-                QString::fromStdString(billLine.acronym),
+                QString::fromStdString(p->acronym),
                 QString::fromStdString(p->name),
-                qtyText(billLine.quantity, p->unit),
-                moneyText(billLine.unitPrice),
-                moneyText(billLine.lineSubtotal)
+                qtyText(orderLine.quantity, p->unit),
+                moneyText(p->unitPrice),
+                moneyText(lineSubtotal)
             };
             for (int c = 0; c < 5; ++c) {
                 auto* it = new QTableWidgetItem(cells[c]);
                 if (c >= 2) it->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-                if (c == 0) it->setData(Qt::UserRole, QString::fromStdString(billLine.productId));
+                if (c == 0) it->setData(Qt::UserRole, QString::fromStdString(p->id));
                 cart_->setItem(row, c, it);
             }
-            if (QString::fromStdString(billLine.productId) == keepId) cart_->selectRow(row);
+            if (QString::fromStdString(p->id) == keepId) cart_->selectRow(row);
             ++row;
         }
 
         subtotalLbl_->setText(moneyText(draft.subtotal));
         taxLbl_->setText(moneyText(draft.tax));
-        discountLbl_->setText(moneyText(draft.discount));
-        seasonalLbl_->setText("0.00 PKR");
+        discountLbl_->setText(moneyText(draft.itemDiscount));
+        seasonalLbl_->setText(moneyText(draft.seasonalDiscount));
         payableLbl_->setText(moneyText(draft.payable));
     } else {
         subtotalLbl_->setText("0.00 PKR");
@@ -505,14 +533,20 @@ void OrderPage::onOpenOrder() {
         showResult({false, "Current role is not allowed to open orders."});
         return;
     }
-    // Placeholder until Member 3 merges OpenOrderDialog + OrderEditService.
-    const OperationResult r{
-        false,
-        "Open Order dialog is waiting for Member 3 (OpenOrderDialog / OrderEditService). "
-        "Use the Held orders strip above to resume held orders in one click."
+
+    const bool needsApproval = needsManagerApproval(role_, Action::EditPaidOrder);
+    auto approvalFn = [this]() -> bool {
+        return ApprovalDialog::ask(auth_, this, "Approve opening/editing a paid order");
     };
-    showResult(r);
-    QMessageBox::information(this, "Open Order (Placeholder)", QString::fromStdString(r.message));
+
+    OpenOrderDialog dlg(orders_, orderStore_, billStore_, todayText(), approvalFn, needsApproval, this);
+    if (dlg.exec() == QDialog::Accepted && orders_.current().has_value()) {
+        nameEdit_->setText(QString::fromStdString(orders_.current()->customerName));
+        contactEdit_->setText(QString::fromStdString(orders_.current()->customerContact));
+        showResult({true, "Opened order " + orders_.current()->id + "."});
+    }
+    refresh();
+    barcodeEdit_->setFocus();
 }
 
 void OrderPage::onPay() {
@@ -526,8 +560,17 @@ void OrderPage::onPay() {
         return;
     }
 
-    Bill draft = buildBill(*cur, catalog_, "");
-    PaymentDialog dlg(draft.payable, this);
+    BillOptions opts;
+    opts.date = cur->date.empty() ? todayText() : cur->date;
+    opts.time = cur->time.empty() ? nowTimeText() : cur->time;
+    opts.seasonalPercent = seasons_.percentFor(opts.date);
+    Bill draft = buildBill(*cur, catalog_, opts);
+
+    const bool canSpecialDirect = !needsManagerApproval(role_, Action::ApplySpecialDiscount);
+    auto approvalFn = [this]() -> bool {
+        return ApprovalDialog::ask(auth_, this, "Approve special discount (up to 8.00%)");
+    };
+    PaymentDialog dlg(draft.payable, canSpecialDirect, approvalFn, this);
     if (dlg.exec() == QDialog::Accepted) {
         PaymentInfo payment = dlg.paymentInfo();
         Bill finalBill;
@@ -564,11 +607,59 @@ void OrderPage::onCancel() {
 }
 
 void OrderPage::onSaveEdited() {
-    // Placeholder until Member 4 merges CheckoutService::saveEdited and Member 3 merges OrderManager::original().
-    showResult({false, "Save changes is waiting for Member 4's CheckoutService::saveEdited."});
+    const auto& cur = orders_.current();
+    const auto& orig = orders_.original();
+    if (!cur || !orig) {
+        showResult({false, "No paid order is currently being edited."});
+        return;
+    }
+    if (cur->lines.empty()) {
+        showResult({false, "Cannot save an empty edited order."});
+        return;
+    }
+
+    std::string billDate = orig->date;
+    if (const auto origBill = billStore_.findByOrderId(orig->id)) {
+        billDate = origBill->date;
+    }
+    if (billDate.empty()) {
+        billDate = todayText();
+    }
+
+    BillOptions opts;
+    opts.date = billDate;
+    opts.time = orig->time;
+    opts.seasonalPercent = seasons_.percentFor(billDate);
+    Bill draft = buildBill(*cur, catalog_, opts);
+
+    const bool canSpecialDirect = !needsManagerApproval(role_, Action::ApplySpecialDiscount);
+    auto approvalFn = [this]() -> bool {
+        return ApprovalDialog::ask(auth_, this, "Approve special discount (up to 8.00%)");
+    };
+    PaymentDialog dlg(draft.payable, canSpecialDirect, approvalFn, this);
+    if (dlg.exec() == QDialog::Accepted) {
+        PaymentInfo payment = dlg.paymentInfo();
+        Bill finalBill;
+        OperationResult r = checkout_.saveEdited(orders_, payment, finalBill);
+        showResult(r);
+        if (r.success) {
+            nameEdit_->clear();
+            contactEdit_->clear();
+            BillDialog billDlg(finalBill, this);
+            billDlg.exec();
+        }
+        refresh();
+        barcodeEdit_->setFocus();
+    }
 }
 
 void OrderPage::onDiscardEdit() {
-    // Placeholder until Member 3 merges OrderEditService::discard.
-    showResult({false, "Discard edit is waiting for Member 3's OrderEditService::discard."});
+    OperationResult r = OrderEditService::discard(orders_);
+    if (r.success) {
+        nameEdit_->clear();
+        contactEdit_->clear();
+    }
+    showResult(r);
+    refresh();
+    barcodeEdit_->setFocus();
 }

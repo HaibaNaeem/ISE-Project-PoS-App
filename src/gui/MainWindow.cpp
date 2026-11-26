@@ -3,9 +3,12 @@
 #include "AccessPolicy.h"
 #include "CameraPanel.h"
 #include "CategoriesPage.h"
+#include "InventoryPage.h"
 #include "OrderPage.h"
 #include "ProductsPage.h"
+#include "ReportsPage.h"
 #include "RoleDialog.h"
+#include "SeasonsPage.h"
 
 #include <QHBoxLayout>
 #include <QLabel>
@@ -38,16 +41,18 @@ MainWindow::MainWindow(const DataPaths& paths,
       paths_(paths),
       auth_(auth),
       role_(initialRole),
-      bills_(paths_.billFile()) {
+      bills_(paths_.billFile(), paths_.billDetailFile()) {
     setWindowTitle("Point of Sale (PoS V2)");
     resize(1240, 760);
 
     // 1. Ensure data/ folder exists and copy sample files if missing
     paths_.ensureDataFolder();
 
-    // 2. Load Product Catalog and Categories
+    // 2. Load Product Catalog, Categories, and Seasons
     catalog_.load(paths_.productFile());
     categories_.load(paths_.categoryFile());
+    seasonStore_.load(paths_.seasonsFile());
+    seasonService_ = SeasonService(seasonStore_.all());
 
     // 3. Load Order Store
     store_ = OrderStore(paths_.orderFile(), paths_.orderDetailFile());
@@ -56,9 +61,11 @@ MainWindow::MainWindow(const DataPaths& paths,
     // 4. Load Bill Store
     bills_.load();
 
-    // 5. Initialize Core Managers
+    // 5. Initialize Core Managers & Report Registry
+    reportRegistry_ = createDefaultReportRegistry();
     orders_ = std::make_unique<OrderManager>(catalog_, &store_);
-    checkout_ = std::make_unique<CheckoutService>(catalog_, store_, bills_, paths_.productFile());
+    inventory_ = std::make_unique<InventoryService>(catalog_, paths_.productFile());
+    checkout_ = std::make_unique<CheckoutService>(catalog_, store_, bills_, paths_.productFile(), seasonService_);
 
     setupChrome();
     applyRole(role_);
@@ -146,7 +153,7 @@ void MainWindow::applyRole(Role role) {
 
     const std::vector<TabSpec> tabTable = {
         {"Orders", Action::RecordOrder, [this]() -> QWidget* {
-            orderPage_ = new OrderPage(catalog_, *orders_, *checkout_, role_, auth_, tabs_);
+            orderPage_ = new OrderPage(catalog_, *orders_, store_, bills_, *checkout_, seasonService_, role_, auth_, tabs_);
             connect(orderPage_, &OrderPage::statusMessage, this, &MainWindow::showStatus);
             return orderPage_;
         }},
@@ -157,19 +164,20 @@ void MainWindow::applyRole(Role role) {
             return new CategoriesPage(categories_, paths_.categoryFile(), tabs_);
         }},
         {"Inventory", Action::ViewInventory, [this]() -> QWidget* {
-            return makePlaceholderTab(
-                "Inventory",
-                "Placeholder tab: waiting for Member 3's InventoryPage (src/gui/InventoryPage.*).");
+            return new InventoryPage(*inventory_, tabs_);
         }},
         {"Seasons", Action::ManageSeasons, [this]() -> QWidget* {
-            return makePlaceholderTab(
-                "Seasons",
-                "Placeholder tab: waiting for Member 5's SeasonsPage (src/gui/SeasonsPage.*).");
+            auto* page = new SeasonsPage(seasonStore_, paths_.seasonsFile(), tabs_);
+            connect(page, &SeasonsPage::seasonsChanged, this, [this]() {
+                seasonService_ = SeasonService(seasonStore_.all());
+                if (orderPage_) {
+                    orderPage_->refreshView();
+                }
+            });
+            return page;
         }},
         {"Reports", Action::ViewReports, [this]() -> QWidget* {
-            return makePlaceholderTab(
-                "Reports",
-                "Placeholder tab: waiting for Member 5's ReportsPage (src/gui/ReportsPage.*).");
+            return new ReportsPage(reportRegistry_, catalog_, store_, bills_, tabs_);
         }}
     };
 
@@ -207,6 +215,16 @@ void MainWindow::syncCameraToCurrentTab() {
 }
 
 void MainWindow::onTabChanged(int) {
+    QWidget* activePage = tabs_ ? tabs_->currentWidget() : nullptr;
+    if (auto* inv = qobject_cast<InventoryPage*>(activePage)) {
+        inv->refresh();
+    } else if (auto* prod = qobject_cast<ProductsPage*>(activePage)) {
+        prod->refresh();
+    } else if (auto* rep = qobject_cast<ReportsPage*>(activePage)) {
+        rep->refresh();
+    } else if (orderPage_ && activePage == orderPage_) {
+        orderPage_->refreshView();
+    }
     syncCameraToCurrentTab();
 }
 

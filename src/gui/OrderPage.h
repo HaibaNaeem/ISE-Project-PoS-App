@@ -7,7 +7,10 @@
 
 #include "ProductCatalog.h"
 #include "OrderManager.h"
+#include "OrderStore.h"
+#include "BillStore.h"
 #include "CheckoutService.h"
+#include "SeasonService.h"
 #include "CommonTypes.h"
 #include "Role.h"
 #include "ManagerAuth.h"
@@ -26,13 +29,17 @@ class OrderPage : public QWidget {
 public:
     OrderPage(ProductCatalog& catalog,
               OrderManager& orders,
+              const OrderStore& orderStore,
+              const BillStore& billStore,
               CheckoutService& checkout,
+              const SeasonService& seasons,
               Role role,
               const ManagerAuth& auth,
               QWidget* parent = nullptr);
     ~OrderPage() override;
 
     void setRole(Role role);
+    void refreshView();
     void startCamera();
     void stopCamera();
     void showResult(const OperationResult& r);
@@ -67,7 +74,10 @@ private:
 
     ProductCatalog& catalog_;
     OrderManager& orders_;
+    const OrderStore& orderStore_;
+    const BillStore& billStore_;
     CheckoutService& checkout_;
+    const SeasonService& seasons_;
     Role role_;
     const ManagerAuth& auth_;
     QString lastBarcode_;

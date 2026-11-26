@@ -13,8 +13,8 @@ int main() {
 
     std::string prodPath = (tempDir / "Product.txt").string();
 
-    Product p1{"101", "123456", "MILKP", "Milk Powder 400g", MeasureUnit::Count, 45000, 2000, 1000, 10000, ""};
-    Product p2{"102", "234567", "SUGAR", "White Sugar", MeasureUnit::Weight, 16000, 0, 0, 2500, ""};
+    Product p1{"101", "123456", "MILKP", "Milk Powder 400g", MeasureUnit::Count, 45000, 2000, 1000, 10000, "", "12"};
+    Product p2{"102", "234567", "SUGAR", "White Sugar", MeasureUnit::Weight, 16000, 0, 0, 2500, "", "23"};
     ProductCatalog catalog({p1, p2});
     CHECK(catalog.save(prodPath).success);
 

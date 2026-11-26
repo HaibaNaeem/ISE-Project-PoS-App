@@ -1,148 +1,73 @@
-# ISE Project - Barcode Reader & Scanner
+# ISE Project - Point of Sale (PoS V2) & Barcode Reader/Scanner
 
-A C++ desktop application (Qt 6, OpenCV, ZXing-C++) that generates Code 39 barcodes from a six-digit code and reads them back from an image or a webcam.
+A C++17 desktop Point of Sale application (Qt 6, OpenCV, ZXing-C++, zint) that generates and scans 6-digit Code 39 barcodes, manages product categories and inventory, records and edits orders, applies seasonal and special discounts, prints PDF bills, and generates six manager reports.
 
 ---
 
 ## Step 0: Build Setup (Windows, do this once)
 
-All libraries (Qt, OpenCV, ZXing-C++) are installed automatically by vcpkg, which is included in this repo. You do NOT download or install any libraries yourself.
+All libraries (Qt, OpenCV, ZXing-C++, zint) are installed automatically by vcpkg, which is included in this repo. You do NOT download or install any libraries yourself.
 
 ### Requirements
 - Windows 64-bit
-- Visual Studio 2022 (fully updated) with the workload "Desktop development with C++"
-- Git and CMake 3.20 or newer, both on PATH
+- Visual Studio 2022 (fully updated) with the workload **"Desktop development with C++"**
+- Git and CMake 3.20 or newer, both on `PATH`
 - About 10 GB of free disk space
-- Clone into a SHORT path such as D:\dev (long paths break the Qt build)
+- Clone into a SHORT path such as `D:\dev` (long paths break the Qt build)
 
 ### Check your compiler
-Open "x64 Native Tools Command Prompt for VS 2022" (use this prompt for every command below) and run:
+Open **"x64 Native Tools Command Prompt for VS 2022"** (use this prompt for every command below) and run:
 
     cl
 
-It must say "Version 19.44" and "for x64". If it does not, update Visual Studio 2022 through the Visual Studio Installer. A different version still works, but the first build will compile Qt and OpenCV itself and take 1 to 3 hours.
+It must say `Version 19.44` and `for x64`. If it does not, update Visual Studio 2022 through the Visual Studio Installer.
 
-### Steps
-1. Download the prebuilt library cache (about 0.65 GB):
-   https://drive.google.com/file/d/1JGPlC44q7UPjXBDORYj_tlxAC1nn1Z31/view?usp=sharing
-   (If Google warns that it cannot scan the file for viruses, click "Download anyway".)
-
-2. Unzip it into a new folder D:\vcpkg-cache (use another drive letter if you have no D:):
-
-       mkdir D:\vcpkg-cache
-       powershell -c "Expand-Archive -Path $env:USERPROFILE\Downloads\vcpkg-cache.zip -DestinationPath D:\vcpkg-cache"
-
-3. Tell vcpkg where the cache is, then CLOSE and REOPEN the command prompt:
+### Clean Build & Run Steps
+1. Download the prebuilt library cache (if provided by the team) and unzip into `D:\vcpkg-cache`, then set:
 
        setx VCPKG_DEFAULT_BINARY_CACHE D:\vcpkg-cache
 
-4. Clone with submodules (the --recursive part is required):
+   Close and reopen the command prompt after setting the variable.
+
+2. Clone with submodules (`--recursive` is required):
 
        cd /d D:\dev
        git clone --recursive https://github.com/HaibaNaeem/ISE-Project-Barcode-Reader-Scanner.git
        cd ISE-Project-Barcode-Reader-Scanner
 
-5. Configure and build (the configure step takes about 5 minutes the first time):
+3. Configure and build in Release mode:
 
        cmake --preset default
        cmake --build --preset release
 
-6. Run all automatic tests (everything except test_camera):
+4. Run all automated tests (everything except `test_camera`, which requires a physical webcam):
 
        ctest --test-dir build -C Release --output-on-failure
 
-   Then check by hand:
+5. Run the manual camera test and desktop application:
 
        build\Release\test_camera.exe
        build\Release\BarcodeDesktopApp.exe
 
-   test_generator should print "Passed: 10  Failed: 0".
-   test_decoder should print "Passed: 7  Failed: 0" "Skipped: 2".
-   test_camera should print camera startup state, live scanning status messages, the decoded 6-digit barcode value upon success, and a  final PASS or failure result.
+---
 
-### Where the data lives (Increment 2)
-The app keeps Product.txt, Order.txt, OrderDetail.txt and Bill.txt in a `data` folder next to the .exe (`build\Release\data`). On the first run the files are copied from `sample_data`. To start again from the sample data, close the app and delete `build\Release\data`. Never commit `data/`.
+## Important: Upgrading from Increment 2
 
-### Adding code
-- Put business logic in src/core/ (no Qt), service code in src/services/ and GUI code in src/gui/. The GUI may use core, core may use services, never the other way round.
-- Put test programs in tests/ and name them test_something.cpp. Each one becomes its own .exe.
-- Do not edit CMakeLists.txt (Member 5 owns it). After adding a new file, run `cmake --preset default` once so it is picked up.
-- Add new libraries only by asking the team leader (they go in vcpkg.json).
+> **Delete the Increment 2 `data/` folder before the first run of Increment 3!**
+>
+> `Product.txt` (added `categoryId`) and `Bill.txt` (changed to one row per bill + `BillDetail.txt`) have new formats in Increment 3. Close the app and delete `build\Release\data` (and `build\Debug\data` if present) before launching `BarcodeDesktopApp.exe`.
 
-### Common problems
-- "LNK1104: cannot open file ...exe": the program is still running. Close it and build again.
-- The clone stops partway: run `git submodule update --init --recursive` and repeat until it finishes.
-- vcpkg starts compiling Qt or OpenCV: your cache folder or compiler version does not match. Check step 3 and the `cl` version.
+On first run, `DataPaths::ensureDataFolder()` automatically creates `build\Release\data\` and copies missing files from `sample_data/`:
+- `Product.txt`, `PCategory.txt`, `Order.txt`, `OrderDetail.txt`, `Bill.txt`, `BillDetail.txt`, `Seasons.txt`, `Settings.txt`
+- Generated PDF bills are written to `build\Release\data\bills\Bill_<id>.pdf`
+- Generated product barcode images are saved to `build\Release\data\barcodes\<barcode>.bmp`
+
+Never commit `build/`, `output/`, `data/`, or generated bill PDFs.
 
 ---
 
-## Step 1: First-Time Git Setup (Do this once)
-
-### 1. Clone the Repository
-If you did not already clone it in Step 0, open your terminal and run:
-
-    git clone --recursive https://github.com/HaibaNaeem/ISE-Project-Barcode-Reader-Scanner.git
-    cd ISE-Project-Barcode-Reader-Scanner
-
-### 2. Fetch All Team Branches
-Download all remote branches to your local machine:
-
-    git fetch --all
-
----
-
-## Step 2: Daily Working Routine
-
-### 1. Switch to Your Personal Branch
-Each team member has an assigned branch (dev-member1 through dev-member5). Never commit work directly to dev or main.
-
-    # Replace dev-member1 with your assigned branch name
-    git checkout dev-member1
-
-### 2. Get the Latest Setup and Teammates' Work
-Do this the first time (to get the build setup) and whenever others have merged into dev:
-
-    git merge origin/dev
-
-### 3. Save Your Work (Stage & Commit)
-After making edits or adding new files to your project, stage and commit them:
-
-    # 1. Stage only your own files, then check what is staged
-    git add path/to/your/file
-    git status
-
-    # 2. Save changes locally with a descriptive message
-    git commit -m "Add feature description here"
-
-### 4. Push Work to GitHub
-Upload your local commits to your remote branch on GitHub:
-
-    # Replace dev-member1 with your branch name
-    git push origin dev-member1
-
----
-
-## Step 3: Submitting Your Code (Pull Requests)
-
-When you are ready to integrate your completed feature into the main codebase:
-
-1. Open the repository on GitHub: https://github.com/HaibaNaeem/ISE-Project-Barcode-Reader-Scanner
-2. Click on the Pull requests tab at the top menu.
-3. Click the green New pull request button.
-4. Set the branch dropdowns as follows:
-   - base: dev (the integration branch)
-   - compare: dev-memberX (your specific member branch)
-5. Click Create pull request, enter a clear title describing your changes, and notify the team leader for review.
-
----
-
-## Quick Reference Command Cheat Sheet
-
-| Task | Git Command |
-|---|---|
-| Check current status & branch | git status |
-| Switch to your branch | git checkout dev-memberX |
-| Get latest updates from integration | git merge origin/dev |
-| Stage your files | git add path/to/file |
-| Commit staged changes | git commit -m "your message" |
-| Push updates to GitHub | git push origin dev-memberX |
+## Architecture & Project Rules
+- `src/services/`: Barcode generation, image decoding, camera scanning, validation, `CommonTypes.h`.
+- `src/core/`: Business logic and file persistence (pure C++17, **no Qt**). All money is `int64_t` paisa; percentages are hundredths of a percent (`10.00% = 1000`).
+- `src/gui/`: Qt 6 Widgets desktop UI (only `src/gui` uses Qt; `BillPdfWriter` lives here because it uses `QPdfWriter`).
+- `tests/`: Standalone CTest executables (`test_*.cpp`). New `.cpp` files in `src/core/`, `src/gui/`, or `tests/` are picked up automatically after re-running `cmake --preset default`.
