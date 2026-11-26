@@ -1,5 +1,6 @@
 #pragma once
 // OWNER: Member 3. Order.txt + OrderDetail.txt are always loaded and saved together.
+#include <optional>
 #include <string>
 #include <vector>
 #include "CommonTypes.h"
@@ -12,7 +13,9 @@ public:
     OrderStore(std::string orderPath, std::string detailPath);
 
     virtual OperationResult load();                      // in-progress orders become on-hold
+    OperationResult load(const std::string& orderPath, const std::string& detailPath);
     virtual OperationResult save() const;                // writes both files (not used by pay(); see serialize*)
+    OperationResult save(const std::string& orderPath, const std::string& detailPath) const;
     virtual OperationResult save(const Order& order);    // save / update a single order and persist
 
     std::string serializeOrders() const;         // whole Order.txt as text (used by CheckoutService)
@@ -25,6 +28,7 @@ public:
 
     std::vector<Order>& orders() { return orders_; }
     const std::vector<Order>& orders() const { return orders_; }
+    std::optional<Order> findById(const std::string& orderId) const;
 
     // Static helper methods for testing and pure logic
     static std::string generateNextOrderId(const std::vector<Order>& existingOrders, int dayOfMonth);

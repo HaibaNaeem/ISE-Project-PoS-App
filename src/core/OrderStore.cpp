@@ -163,6 +163,23 @@ std::string OrderStore::serializeDetails() const {
     return text;
 }
 
+OperationResult OrderStore::load(const std::string& orderPath, const std::string& detailPath) {
+    orderPath_ = orderPath;
+    detailPath_ = detailPath;
+    return load();
+}
+
+OperationResult OrderStore::save(const std::string& orderPath, const std::string& detailPath) const {
+    FileTransaction tx;
+    if (!orderPath.empty()) {
+        tx.add(orderPath, serializeOrders());
+    }
+    if (!detailPath.empty()) {
+        tx.add(detailPath, serializeDetails());
+    }
+    return tx.commit();
+}
+
 OperationResult OrderStore::save() const {
     FileTransaction tx;
     if (!orderPath_.empty()) {
@@ -187,6 +204,15 @@ OperationResult OrderStore::save(const Order& order) {
         orders_.push_back(order);
     }
     return save();
+}
+
+std::optional<Order> OrderStore::findById(const std::string& orderId) const {
+    for (const auto& ord : orders_) {
+        if (ord.id == orderId) {
+            return ord;
+        }
+    }
+    return std::nullopt;
 }
 
 std::string OrderStore::nextOrderId(int dayOfMonth) const {

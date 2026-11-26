@@ -15,5 +15,10 @@ int main() {
     // Also verify global hasEnoughStock alias
     CHECK(hasEnoughStock(2, 3, 5));
 
+    // Paid-order edit stock check: remaining stock 10 after selling 2 (available + origQty = 12)
+    CHECK(StockRules::hasEnoughStock(0, 5000, 10000 + 2000));
+    CHECK(StockRules::hasEnoughStock(0, 12000, 10000 + 2000));
+    CHECK(!StockRules::hasEnoughStock(0, 13000, 10000 + 2000));
+
     return testSummary("test_stock_rules");
 }
