@@ -20,7 +20,7 @@ inline const char* const kTableAltRow = "#F0F5F4"; // Soft teal-tinted alternati
 
 inline QString dialogStyleSheet() {
     return QString(
-        "QDialog {"
+        "QDialog, ProductsPage, CategoriesPage {"
         "    background-color: %1;"
         "    color: %2;"
         "    font-family: 'Segoe UI', -apple-system, sans-serif;"
@@ -64,8 +64,26 @@ inline QString dialogStyleSheet() {
         "    color: %2;"
         "    spacing: 8px;"
         "}"
+        "QComboBox {"
+        "    background-color: #FFFFFF;"
+        "    color: %2;"
+        "    border: 1px solid %4;"
+        "    border-radius: 4px;"
+        "    padding: 6px;"
+        "}"
+        "QComboBox:disabled {"
+        "    background-color: #E5E7EB;"
+        "    color: %6;"
+        "}"
+        "QComboBox QAbstractItemView {"
+        "    background-color: #FFFFFF;"
+        "    color: %2;"
+        "    selection-background-color: %5;"
+        "    selection-color: #FFFFFF;"
+        "}"
         "QTableWidget {"
         "    background-color: #FFFFFF;"
+        "    color: %2;"
         "    alternate-background-color: %7;"
         "    border: 1px solid %4;"
         "    border-radius: 4px;"
@@ -121,4 +139,3 @@ inline QString dialogStyleSheet() {
 }
 
 } // namespace DialogStyle
-

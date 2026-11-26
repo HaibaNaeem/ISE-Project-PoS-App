@@ -16,6 +16,7 @@ public:
     std::string orderFile() const;         // data/Order.txt
     std::string orderDetailFile() const;   // data/OrderDetail.txt
     std::string billFile() const;          // data/Bill.txt
+    std::string categoryFile() const;      // data/PCategory.txt
     // [WRITTEN BY MEMBER 4 on behalf of MEMBER 5 – minimal version so Member 4's billing work could build/test. Member 5: review, extend or replace; keep the agreed signatures.]
     std::string billDetailFile() const;    // data/BillDetail.txt
 
