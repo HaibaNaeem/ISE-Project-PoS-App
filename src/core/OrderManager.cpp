@@ -6,6 +6,26 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
+
+namespace {
+
+std::string normalizeCustomerName(const std::string& name) {
+    size_t start = 0;
+    while (start < name.size() && std::isspace(static_cast<unsigned char>(name[start]))) {
+        ++start;
+    }
+    size_t end = name.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(name[end - 1]))) {
+        --end;
+    }
+    if (start >= end) {
+        return "Walk-in";
+    }
+    return name.substr(start, end - start);
+}
+
+} // namespace
 
 OrderManager::OrderManager(const ProductCatalog& catalog, OrderStore* store,
                            std::function<std::string()> dateTimeProvider)
@@ -59,7 +79,7 @@ DateTime OrderManager::getNow() const {
 }
 
 void OrderManager::syncCurrentToStore() {
-    if (!current_.has_value()) return;
+    if (!current_.has_value() || original_.has_value()) return;
 
     if (store_) {
         store_->save(*current_);
@@ -76,6 +96,46 @@ void OrderManager::syncCurrentToStore() {
             inMemoryOrders_.push_back(*current_);
         }
     }
+}
+
+void OrderManager::dropCurrentOrder() {
+    if (!current_.has_value()) return;
+
+    if (!current_->lines.empty()) {
+        hold();
+        return;
+    }
+
+    const std::string droppedId = current_->id;
+    current_.reset();
+    if (store_) {
+        auto& all = store_->orders();
+        auto oldSize = all.size();
+        all.erase(std::remove_if(all.begin(), all.end(),
+                                 [&droppedId](const Order& ord) { return ord.id == droppedId; }),
+                  all.end());
+        if (all.size() != oldSize) {
+            store_->save();
+        }
+    } else {
+        inMemoryOrders_.erase(
+            std::remove_if(inMemoryOrders_.begin(), inMemoryOrders_.end(),
+                           [&droppedId](const Order& ord) { return ord.id == droppedId; }),
+            inMemoryOrders_.end());
+    }
+}
+
+Quantity OrderManager::originalQuantityOf(const std::string& productId) const {
+    if (!original_.has_value()) {
+        return 0;
+    }
+    Quantity total = 0;
+    for (const auto& line : original_->lines) {
+        if (line.productId == productId) {
+            total += line.quantity;
+        }
+    }
+    return total;
 }
 
 OperationResult OrderManager::startOrder(const std::string& customerName, const std::string& customerContact) {
@@ -95,7 +155,7 @@ OperationResult OrderManager::startOrder(const std::string& customerName, const 
     newOrder.id = orderId;
     newOrder.date = now.date;
     newOrder.time = now.time;
-    newOrder.customerName = customerName;
+    newOrder.customerName = normalizeCustomerName(customerName);
     newOrder.customerContact = customerContact;
     newOrder.status = OrderStatus::InProgress;
     newOrder.paymentAmount = 0;
@@ -109,10 +169,19 @@ OperationResult OrderManager::startOrder(const std::string& customerName, const 
     return {true, "Order started successfully. ID: " + newOrder.id, newOrder.id};
 }
 
-OperationResult OrderManager::addByBarcode(const std::string& barcode, Quantity quantity) {
+OperationResult OrderManager::setCustomer(const std::string& customerName, const std::string& customerContact) {
     if (!current_.has_value()) {
-        return {false, "No active order. Please start an order first."};
+        return {false, "No active order."};
     }
+
+    current_->customerName = normalizeCustomerName(customerName);
+    current_->customerContact = customerContact;
+    syncCurrentToStore();
+
+    return {true, "Customer updated.", current_->id};
+}
+
+OperationResult OrderManager::addByBarcode(const std::string& barcode, Quantity quantity) {
     if (quantity <= 0) {
         return {false, "Quantity must be greater than zero."};
     }
@@ -123,8 +192,9 @@ OperationResult OrderManager::addByBarcode(const std::string& barcode, Quantity 
     }
 
     const Product& product = *prodOpt;
+    const Quantity origQty = originalQuantityOf(product.id);
 
-    if (product.available <= 0) {
+    if (product.available + origQty <= 0) {
         return {false, "Product is out of stock: " + product.name};
     }
 
@@ -133,15 +203,24 @@ OperationResult OrderManager::addByBarcode(const std::string& barcode, Quantity 
     }
 
     Quantity alreadyInCart = 0;
-    for (const auto& line : current_->lines) {
-        if (line.productId == product.id) {
-            alreadyInCart = line.quantity;
-            break;
+    if (current_.has_value()) {
+        for (const auto& line : current_->lines) {
+            if (line.productId == product.id) {
+                alreadyInCart = line.quantity;
+                break;
+            }
         }
     }
 
-    if (!StockRules::hasEnoughStock(alreadyInCart, quantity, product.available)) {
+    if (!StockRules::hasEnoughStock(alreadyInCart, quantity, product.available + origQty)) {
         return {false, "Not enough stock for product '" + product.name + "'."};
+    }
+
+    if (!current_.has_value()) {
+        auto startRes = startOrder("Walk-in", "");
+        if (!startRes.success) {
+            return startRes;
+        }
     }
 
     bool found = false;
@@ -179,8 +258,10 @@ OperationResult OrderManager::setQuantity(const std::string& productId, Quantity
         return {false, "Count products require whole quantities (e.g., 1, 2, 3)."};
     }
 
-    // When setting quantity, new total is tested against available stock
-    if (!StockRules::hasEnoughStock(0, quantity, product.available)) {
+    const Quantity origQty = originalQuantityOf(productId);
+
+    // When setting quantity, new total is tested against available stock (+ original qty if editing a paid order)
+    if (!StockRules::hasEnoughStock(0, quantity, product.available + origQty)) {
         return {false, "Not enough stock for product '" + product.name + "'."};
     }
 
@@ -221,6 +302,9 @@ OperationResult OrderManager::hold() {
     if (!current_.has_value()) {
         return {false, "No active order to hold."};
     }
+    if (original_.has_value()) {
+        return {false, "Cannot hold a paid order being edited. Save or discard edits first."};
+    }
 
     current_->status = OrderStatus::OnHold;
     std::string orderId = current_->id;
@@ -230,41 +314,63 @@ OperationResult OrderManager::hold() {
     return {true, "Order placed on hold. ID: " + orderId, orderId};
 }
 
+namespace {
+
+bool isOpenableStatus(OrderStatus s, bool allowInProgress) {
+    return s == OrderStatus::OnHold || (allowInProgress && s == OrderStatus::InProgress);
+}
+
+bool hasOpenableOrder(const std::vector<Order>& list, const std::string& orderId, bool allowInProgress) {
+    return std::any_of(list.begin(), list.end(), [&](const Order& ord) {
+        return ord.id == orderId && isOpenableStatus(ord.status, allowInProgress);
+    });
+}
+
+bool takeOpenableOrder(std::vector<Order>& list, const std::string& orderId, bool allowInProgress, Order& out) {
+    auto it = std::find_if(list.begin(), list.end(), [&](const Order& ord) {
+        return ord.id == orderId && isOpenableStatus(ord.status, allowInProgress);
+    });
+    if (it == list.end()) {
+        return false;
+    }
+    it->status = OrderStatus::InProgress;
+    out = *it;
+    return true;
+}
+
+} // namespace
+
 OperationResult OrderManager::resume(const std::string& orderId) {
-    if (current_.has_value()) {
-        return {false, "An active order is already in progress. Please hold or cancel the current order first."};
+    if (original_.has_value()) {
+        return {false, "Cannot resume another order while editing a paid order. Save or discard edits first."};
     }
 
-    if (store_) {
-        auto& all = store_->orders();
-        auto it = std::find_if(all.begin(), all.end(),
-                               [&orderId](const Order& ord) {
-                                   return ord.id == orderId && ord.status == OrderStatus::OnHold;
-                               });
-        if (it == all.end()) {
-            return {false, "No on-hold order found with ID: " + orderId};
-        }
-        it->status = OrderStatus::InProgress;
-        current_ = *it;
-        syncCurrentToStore();
-        return {true, "Order resumed successfully. ID: " + orderId, orderId};
-    } else {
-        auto it = std::find_if(inMemoryOrders_.begin(), inMemoryOrders_.end(),
-                               [&orderId](const Order& ord) {
-                                   return ord.id == orderId && ord.status == OrderStatus::OnHold;
-                               });
-        if (it == inMemoryOrders_.end()) {
-            return {false, "No on-hold order found with ID: " + orderId};
-        }
-        it->status = OrderStatus::InProgress;
-        current_ = *it;
-        return {true, "Order resumed successfully. ID: " + orderId, orderId};
+    std::vector<Order>& targetList = store_ ? store_->orders() : inMemoryOrders_;
+    if (!hasOpenableOrder(targetList, orderId, false)) {
+        return {false, "No on-hold order found with ID: " + orderId};
     }
+
+    if (current_.has_value()) {
+        dropCurrentOrder();
+    }
+
+    Order activated;
+    if (!takeOpenableOrder(targetList, orderId, false, activated)) {
+        return {false, "No on-hold order found with ID: " + orderId};
+    }
+    current_ = activated;
+    if (store_) {
+        syncCurrentToStore();
+    }
+    return {true, "Order resumed successfully. ID: " + orderId, orderId};
 }
 
 OperationResult OrderManager::cancel() {
     if (!current_.has_value()) {
         return {false, "No active order to cancel."};
+    }
+    if (original_.has_value()) {
+        return discardEdit();
     }
 
     current_->status = OrderStatus::Archived;
@@ -273,6 +379,59 @@ OperationResult OrderManager::cancel() {
     current_.reset();
 
     return {true, "Order cancelled and archived. ID: " + orderId, orderId};
+}
+
+OperationResult OrderManager::beginPaidEdit(const Order& paidOrder) {
+    if (original_.has_value()) {
+        return {false, "Another paid order is already being edited. Save or discard edits first."};
+    }
+    if (paidOrder.status != OrderStatus::Paid) {
+        return {false, "Only paid orders can be opened in paid-edit mode."};
+    }
+    if (current_.has_value()) {
+        dropCurrentOrder();
+    }
+    original_ = paidOrder;
+    current_ = paidOrder;
+    return {true, "Paid order opened for editing. ID: " + paidOrder.id, paidOrder.id};
+}
+
+OperationResult OrderManager::openStoredOrder(const std::string& orderId) {
+    if (original_.has_value()) {
+        return {false, "Cannot open another order while editing a paid order. Save or discard edits first."};
+    }
+    if (current_.has_value() && current_->id == orderId) {
+        return {true, "Order is already active. ID: " + orderId, orderId};
+    }
+
+    std::vector<Order>& targetList = store_ ? store_->orders() : inMemoryOrders_;
+    if (!hasOpenableOrder(targetList, orderId, true)) {
+        return {false, "No on-hold or in-progress order found with ID: " + orderId};
+    }
+
+    if (current_.has_value()) {
+        dropCurrentOrder();
+    }
+
+    Order activated;
+    if (!takeOpenableOrder(targetList, orderId, true, activated)) {
+        return {false, "No on-hold or in-progress order found with ID: " + orderId};
+    }
+    current_ = activated;
+    if (store_) {
+        syncCurrentToStore();
+    }
+    return {true, "Order opened. ID: " + orderId, orderId};
+}
+
+OperationResult OrderManager::discardEdit() {
+    if (!original_.has_value()) {
+        return {false, "No paid order edit is in progress."};
+    }
+    const std::string orderId = original_->id;
+    current_.reset();
+    original_.reset();
+    return {true, "Paid order edit discarded. ID: " + orderId, orderId};
 }
 
 std::vector<Order> OrderManager::heldOrders() const {

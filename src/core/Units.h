@@ -1,3 +1,4 @@
+
 #pragma once
 // OWNER: Member 2. Shared contract (frozen). Do not change signatures without telling the team.
 #include <cstdint>
@@ -24,3 +25,9 @@ std::string formatQuantity(Quantity value, MeasureUnit unit); // 3000 Count -> "
 // price x quantity with rounding (half up). 450.00 x 2 pcs -> 90000 paisa.
 // Quantity is in thousandths, so result = price * quantity / 1000, rounded.
 Money multiplyPriceByQuantity(Money unitPrice, Quantity quantity);
+
+using Percent = std::int64_t;   // hundredths of a percent: 8% = 800, 12.50% = 1250
+
+OperationResult parsePercent(const std::string& text, Percent& out);   // "8" -> 800
+std::string formatPercent(Percent p);                                  // 800 -> "8.00"
+Money percentOf(Money amount, Percent percent);                        // half up, integers only

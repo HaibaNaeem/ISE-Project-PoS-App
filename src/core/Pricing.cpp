@@ -1,90 +1,129 @@
 // OWNER: Member 4.
-// Pure calculation module: calculates line totals, aggregates bills, and calculates cash change.
+// Financial math implementation for Increment 3. Pure calculation, no files, no floats.
 #include "Pricing.h"
-
-namespace {
-
-// Helper to multiply price/rate by quantity using M2's rounding formula.
-// If M2's stub in dev returns 0 for non-zero inputs, fall back to the contract formula:
-// (unitPrice * quantity + 500) / 1000
-Money safeMultiply(Money unitPrice, Quantity quantity) {
-    if (unitPrice == 0 || quantity == 0) {
-        return 0;
-    }
-    Money result = multiplyPriceByQuantity(unitPrice, quantity);
-    if (result == 0) {
-        // Fallback in case M2's implementation is still an unmerged stub returning 0
-        return (unitPrice * quantity + 500) / 1000;
-    }
-    return result;
-}
-
-} // anonymous namespace
+#include "Units.h"
 
 BillLine priceLine(const Product& product, Quantity quantity) {
     BillLine line;
-    line.productId = product.id;
     line.acronym = product.acronym;
     line.unitPrice = product.unitPrice;
-    line.discountPerUnit = product.discountPerUnit;
     line.quantity = quantity;
-
-    // Subtotal: base price before taxes and discounts
-    line.lineSubtotal = safeMultiply(product.unitPrice, quantity);
-
-    // Tax: fixed PKR tax per unit multiplied by quantity
-    line.lineTax = safeMultiply(product.taxPerUnit, quantity);
-
-    // Discount: fixed PKR discount per unit multiplied by quantity
-    line.lineDiscount = safeMultiply(product.discountPerUnit, quantity);
-
-    // Payable = Subtotal + Tax - Discount
-    line.linePayable = line.lineSubtotal + line.lineTax - line.lineDiscount;
-    if (line.linePayable < 0) {
-        line.linePayable = 0; // Prevent negative payable
-    }
-
+    line.discount = multiplyPriceByQuantity(product.discountPerUnit, quantity);
     return line;
 }
 
-Bill buildBill(const Order& order, const ProductCatalog& catalog, const std::string& billId) {
+Bill buildBill(const Order& order, const ProductCatalog& catalog, const BillOptions& options,
+               const std::vector<std::shared_ptr<IDiscountRule>>& rules) {
     Bill bill;
-    bill.id = billId;
+    bill.id = options.billId;
+    bill.customerName = order.customerName.empty() ? "Walk-in" : order.customerName;
     bill.orderId = order.id;
-    bill.customerName = order.customerName;
-    bill.date = order.date;
-    bill.time = order.time;
-    bill.status = OrderStatus::Paid;
+    bill.date = options.date;
+    bill.time = options.time;
+    bill.status = (order.status == OrderStatus::InProgress) ? OrderStatus::Paid : order.status;
     bill.paymentMode = order.mode;
     bill.merchant = order.merchant;
 
-    // Price every order line and aggregate grand totals
+    Money subtotal = 0;
+    Money tax = 0;
+    Money itemDiscount = 0;
+
     for (const auto& orderLine : order.lines) {
-        // Try to find product by ID first, then by barcode as fallback
-        std::optional<Product> product = catalog.findById(orderLine.productId);
-        if (!product && !orderLine.barcode.empty()) {
-            product = catalog.findByBarcode(orderLine.barcode);
+        std::optional<Product> prod = catalog.findById(orderLine.productId);
+        if (!prod && !orderLine.barcode.empty()) {
+            prod = catalog.findByBarcode(orderLine.barcode);
+        }
+        if (!prod) {
+            continue; // Gracefully skip uncatalogued products
         }
 
-        if (!product) {
-            // Unknown product: skip gracefully without crashing
-            continue;
-        }
+        Quantity qty = orderLine.quantity;
+        Money lineSub = multiplyPriceByQuantity(prod->unitPrice, qty);
+        Money lineTax = multiplyPriceByQuantity(prod->taxPerUnit, qty);
+        Money lineDisc = multiplyPriceByQuantity(prod->discountPerUnit, qty);
 
-        BillLine line = priceLine(*product, orderLine.quantity);
+        BillLine line;
+        line.acronym = prod->acronym;
+        line.unitPrice = prod->unitPrice;
+        line.quantity = qty;
+        line.discount = lineDisc;
+
         bill.lines.push_back(line);
 
-        bill.subtotal += line.lineSubtotal;
-        bill.tax += line.lineTax;
-        bill.discount += line.lineDiscount;
-        bill.payable += line.linePayable;
+        subtotal += lineSub;
+        tax += lineTax;
+        itemDiscount += lineDisc;
     }
+
+    Money base = subtotal + tax - itemDiscount;
+    if (base < 0) {
+        base = 0;
+    }
+
+    Money seasonalDiscount = 0;
+    Money specialDiscount = 0;
+
+    for (const auto& rule : rules) {
+        if (!rule) continue;
+        if (rule->name() == "Seasonal") {
+            seasonalDiscount += rule->amount(base, options);
+        } else if (rule->name() == "Special") {
+            specialDiscount += rule->amount(base, options);
+        } else {
+            // Extensible: any new discount rule applies to the same base
+            Money extra = rule->amount(base, options);
+            specialDiscount += extra;
+        }
+    }
+
+    Money totalDiscounts = seasonalDiscount + specialDiscount;
+    Money payable = (base > totalDiscounts) ? (base - totalDiscounts) : 0;
+
+    Money received = options.received;
+    Money balance = 0;
+    if (order.mode == PaymentMode::Cash) {
+        if (received >= payable) {
+            balance = received - payable;
+        }
+    } else {
+        // Card or digital wallet: received = payable, balance = 0
+        received = payable;
+        balance = 0;
+    }
+
+    bill.subtotal = subtotal;
+    bill.tax = tax;
+    bill.itemDiscount = itemDiscount;
+    bill.seasonalDiscount = seasonalDiscount;
+    bill.specialDiscount = specialDiscount;
+    bill.payable = payable;
+    bill.received = received;
+    bill.balance = balance;
+    bill.discount = itemDiscount + seasonalDiscount + specialDiscount;
 
     return bill;
 }
 
+Bill buildBill(const Order& order, const ProductCatalog& catalog, const BillOptions& options) {
+    std::vector<std::shared_ptr<IDiscountRule>> defaultRules = {
+        std::make_shared<SeasonalDiscountRule>(),
+        std::make_shared<SpecialDiscountRule>()
+    };
+    return buildBill(order, catalog, options, defaultRules);
+}
+
+Bill buildBill(const Order& order, const ProductCatalog& catalog, const std::string& billId) {
+    BillOptions options;
+    options.billId = billId;
+    options.date = order.date;
+    options.time = order.time;
+    options.seasonalPercent = 0;
+    options.specialPercent = 0;
+    options.received = 0;
+    return buildBill(order, catalog, options);
+}
+
 Money changeDue(Money payable, Money tendered) {
-    // Return change only if customer gave more than what is owed
     if (tendered <= payable) {
         return 0;
     }

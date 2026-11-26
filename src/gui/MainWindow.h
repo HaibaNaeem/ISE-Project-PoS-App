@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "DataPaths.h"
+#include "CategoryStore.h"
 #include "ProductCatalog.h"
 #include "OrderStore.h"
 #include "BillStore.h"
@@ -43,6 +44,7 @@ private:
     ManagerAuth auth_;
     Role role_;
 
+    CategoryStore categories_;
     ProductCatalog catalog_;
     OrderStore store_;
     BillStore bills_;

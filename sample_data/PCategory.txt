@@ -1,0 +1,9 @@
+10 "Rice" RICE #
+12 "Dairy" DAIRY #
+20 "Sugar and Sweeteners" SUGAR #
+30 "Cooking Oil" OIL #
+40 "Tea" TEA #
+50 "Biscuits" BISCUIT #
+60 "Flour" FLOUR #
+70 "Personal Care" CARE #
+80 "Beverages" DRINKS #

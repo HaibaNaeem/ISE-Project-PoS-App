@@ -23,9 +23,12 @@ int main()
     CHECK(!splitRecord("101 \"Milk #", 3, f).success);
     CHECK(!splitRecord("", 4, f).success);
 
-    CHECK(writeRecord({"101", quoteField("Milk Powder"), "12"}) == "101 \"Milk Powder\" 12 #");
-    CHECK(quoteField("") == "\"\"");
+        a = splitRecord("101 123456 12 MILKP Milk_Powder_400g count 450.00 sample_data/barcodes/123456.bmp #", 8, f);
+    CHECK(a.success && f.size() == 8 && f[4] == "Milk_Powder_400g" && f[7] == "sample_data/barcodes/123456.bmp");
 
+    a = splitRecord("00000714 2026-11-16 Ali_Khan - on-hold #", 9, f);
+    CHECK(a.success && f.size() == 5 && f[2] == "Ali_Khan" && f[3].empty());
+    
     namespace fs = std::filesystem;
     fs::create_directories("tx_test");
 

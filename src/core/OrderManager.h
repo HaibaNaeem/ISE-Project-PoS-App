@@ -16,18 +16,28 @@ public:
                  std::function<std::string()> dateTimeProvider = nullptr);
 
     OperationResult startOrder(const std::string& customerName, const std::string& customerContact);
-    OperationResult addByBarcode(const std::string& barcode, Quantity quantity);  // merges repeated scans, checks stock
+    OperationResult setCustomer(const std::string& customerName, const std::string& customerContact);
+    OperationResult addByBarcode(const std::string& barcode, Quantity quantity);  // auto-starts order if none active; merges repeated scans, checks stock
     OperationResult setQuantity(const std::string& productId, Quantity quantity);
     OperationResult removeLine(const std::string& productId);
     OperationResult hold();
     OperationResult resume(const std::string& orderId);
-    OperationResult cancel();                                  // status archived, stock unchanged
+    OperationResult cancel();                                  // status archived, stock unchanged (discards if editing paid order)
 
     const std::optional<Order>& current() const { return current_; }
+    const std::optional<Order>& original() const { return original_; }
     std::vector<Order> heldOrders() const;
 
+    // Used by OrderEditService when opening/discarding a paid order edit in memory.
+    OperationResult beginPaidEdit(const Order& paidOrder);
+    OperationResult openStoredOrder(const std::string& orderId);
+    OperationResult discardEdit();
+
     // Used by CheckoutService after a successful payment: forget the current order.
-    void clearCurrent() { current_.reset(); }
+    void clearCurrent() {
+        current_.reset();
+        original_.reset();
+    }
 
     // Tests can fix the date so Order IDs are predictable.
     void setClock(std::function<DateTime()> clock) { clock_ = std::move(clock); }
@@ -35,6 +45,8 @@ public:
 private:
     DateTime getNow() const;
     void syncCurrentToStore();
+    void dropCurrentOrder();
+    Quantity originalQuantityOf(const std::string& productId) const;
 
     const ProductCatalog* catalog_;
     OrderStore* store_;
@@ -42,4 +54,5 @@ private:
     std::function<DateTime()> clock_;
     std::function<std::string()> legacyClock_;
     std::vector<Order> inMemoryOrders_;  // For standalone tests when store_ is nullptr
+    std::optional<Order> original_;      // Set only while a paid order is being edited (kept at end for layout compatibility)
 };
